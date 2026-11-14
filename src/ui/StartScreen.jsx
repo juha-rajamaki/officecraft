@@ -24,6 +24,7 @@ export function StartScreen({ onPlay }) {
         </button>
         <Sensitivity />
         <Controls />
+        <p className="credits">Built by Leevi · improved by borre</p>
       </div>
     </div>
   );
