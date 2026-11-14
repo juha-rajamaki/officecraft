@@ -1,7 +1,7 @@
 // First-person held item ("viewmodel"), rendered in its own scene on top of the world.
 import * as THREE from 'three';
-import { BLOCKS, PICKAXE, SWORD, NT, CUTOUT } from './blocks.js';
-import { swordPixels } from './textures.js';
+import { BLOCKS, ITEMS, NT, CUTOUT } from './blocks.js';
+import { itemPixels } from './textures.js';
 
 const FACE_SHADE = [0.8, 0.8, 1, 0.5, 0.65, 0.65]; // BoxGeometry order: +x -x +y -y +z -z
 
@@ -57,19 +57,6 @@ function voxelGeometry(pixels) {
   return geo;
 }
 
-function pickaxePixels() {
-  const px = new Map();
-  const put = (x, y, c) => px.set(`${x},${y}`, [x, y, c]);
-  for (let y = 4; y < 16; y++) { put(7, y, '#8a5a2b'); put(8, y, '#5e3b19'); }
-  for (let a = -150; a <= -30; a += 2) {
-    const r = (a * Math.PI) / 180;
-    const x = Math.round(8 + 9 * Math.cos(r)), y = Math.round(11 + 9 * Math.sin(r));
-    put(x, y + 1, '#9aa6ab');
-    put(x, y, '#e3ecef');
-  }
-  return [...px.values()];
-}
-
 export class Hand {
   constructor(atlas) {
     this.scene = new THREE.Scene();
@@ -83,15 +70,7 @@ export class Hand {
     this.armMat = new THREE.MeshBasicMaterial({ color: 0xd9a27a, fog: false });
 
     this.blockGeos = {};
-    this.pickaxe = new THREE.Mesh(voxelGeometry(pickaxePixels()), this.colorMat);
-    this.pickaxe.scale.setScalar(0.034);
-    this.pickaxe.position.set(0.1, 0.0, 0);
-    this.pickaxe.rotation.set(0.1, -1.25, 0.55);
-
-    this.sword = new THREE.Mesh(voxelGeometry(swordPixels()), this.colorMat);
-    this.sword.scale.setScalar(0.031);
-    this.sword.position.set(0.05, 0.12, 0);
-    this.sword.rotation.set(-0.1, -0.55, 0.42);
+    this.itemMeshes = {}; // voxel models for tools and materials, built on first use
 
     this.block = new THREE.Mesh(blockGeometry(1), this.blockMat);
     this.block.scale.setScalar(0.24);
@@ -125,20 +104,33 @@ export class Hand {
   setItem(id) {
     if (id === this.current) return;
     this.current = id;
+    this.selfLit = !!BLOCKS[id]?.light; // a held lamp stays bright at night
     this.equip = 1;
     this.holder.clear();
     if (!id) {
       this.holder.add(this.arm);
-    } else if (id === PICKAXE) {
-      this.holder.add(this.pickaxe);
-    } else if (id === SWORD) {
-      this.holder.add(this.sword);
+    } else if (ITEMS[id]) {
+      this.holder.add(this.itemMesh(id));
     } else {
       if (!this.blockGeos[id]) this.blockGeos[id] = blockGeometry(id);
       this.block.geometry = this.blockGeos[id];
       this.block.material = CUTOUT[id] ? this.cutoutMat : this.blockMat;
       this.holder.add(this.block);
     }
+  }
+
+  itemMesh(id) {
+    if (this.itemMeshes[id]) return this.itemMeshes[id];
+    const m = new THREE.Mesh(voxelGeometry(itemPixels(id)), this.colorMat);
+    const it = ITEMS[id];
+    if (it.mineMult) {        // pickaxes
+      m.scale.setScalar(0.034); m.position.set(0.1, 0.0, 0); m.rotation.set(0.1, -1.25, 0.55);
+    } else if (it.damage) {   // swords
+      m.scale.setScalar(0.031); m.position.set(0.05, 0.12, 0); m.rotation.set(-0.1, -0.55, 0.42);
+    } else {                  // coal / iron lumps
+      m.scale.setScalar(0.022); m.position.set(0.06, -0.02, 0); m.rotation.set(0.2, -0.7, 0.1);
+    }
+    return (this.itemMeshes[id] = m);
   }
 
   triggerSwing() {
@@ -161,7 +153,7 @@ export class Hand {
 
     for (const m of [this.blockMat, this.cutoutMat, this.colorMat, this.armMat]) {
       if (m === this.armMat) m.color.setHex(0xd9a27a).multiplyScalar(light);
-      else m.color.setScalar(light);
+      else m.color.setScalar(m === this.blockMat && this.selfLit ? 1.6 : light);
     }
   }
 }

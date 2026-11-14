@@ -42,6 +42,39 @@ export function addItem(id, n = 1) {
   return left;
 }
 
+/** how many of an item the player owns (infinite stacks don't count) */
+export function countItem(id) {
+  let n = 0;
+  for (const s of store.get().slots) if (s && s.id === id && !s.inf) n += s.count;
+  return n;
+}
+
+/** removes up to n of an item (never from infinite stacks); returns how many were removed */
+export function removeItem(id, n) {
+  const slots = store.get().slots.slice();
+  let left = n;
+  for (let i = SIZE - 1; i >= 0 && left; i--) {
+    const s = slots[i];
+    if (!s || s.id !== id || s.inf) continue;
+    const take = Math.min(left, s.count);
+    slots[i] = s.count > take ? { ...s, count: s.count - take } : null;
+    left -= take;
+  }
+  store.set({ slots });
+  return n - left;
+}
+
+/** how many of this item would still fit in the inventory */
+export function roomFor(id) {
+  const max = maxStack(id);
+  let room = 0;
+  for (const s of store.get().slots) {
+    if (!s) room += max;
+    else if (s.id === id && !s.inf) room += max - s.count;
+  }
+  return room;
+}
+
 export function consumeSelected() {
   const { slots, selected } = store.get();
   const s = slots[selected];
@@ -110,7 +143,7 @@ export function returnCursor() {
   const { cursor } = store.get();
   if (!cursor) return;
   store.set({ cursor: null });
-  if (cursor.inf || cursor.id >= 100) {
+  if (cursor.inf || maxStack(cursor.id) === 1) {
     const slots = store.get().slots.slice();
     const j = slots.indexOf(null);
     if (j >= 0) { slots[j] = cursor; store.set({ slots }); }

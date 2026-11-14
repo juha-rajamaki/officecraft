@@ -4,8 +4,10 @@ import * as THREE from 'three';
 
 const terrainVertex = /* glsl */ `
 uniform float uTime;
-attribute vec3 aData; // x = ambient occlusion, y = face index, z = kind (0 solid, 1 leaves, 2 water)
+attribute vec3 aData; // x = ambient occlusion, y = face index, z = kind (0 solid, 1 leaves, 2 water, 3 lamp)
+attribute float aLight; // baked lamp light 0..1
 varying vec2 vUv;
+varying float vLight;
 varying float vAO;
 varying vec3 vNormal;
 varying vec3 vWorld;
@@ -27,7 +29,7 @@ void main() {
     p.x += sin(w) * 0.045;
     p.z += cos(w * 0.8 + 1.3) * 0.045;
     p.y += sin(w * 1.3) * 0.02;
-  } else if (kind > 1.5) {
+  } else if (kind > 1.5 && kind < 2.5) {
     // gentle water swell
     p.y += (sin(uTime * 1.4 + p.x * 0.7 + p.z * 0.5) * 0.5 + sin(uTime * 1.1 - p.z * 0.9) * 0.5) * 0.045 - 0.04;
   }
@@ -38,6 +40,7 @@ void main() {
   vNormal = NORMALS[int(aData.y + 0.5)];
   vWorld = p;
   vKind = kind;
+  vLight = aLight;
   vDist = length(mv.xyz);
 }
 `;
@@ -64,6 +67,7 @@ varying vec3 vNormal;
 varying vec3 vWorld;
 varying float vKind;
 varying float vDist;
+varying float vLight;
 
 void main() {
   vec4 tex = texture2D(map, vUv);
@@ -73,7 +77,8 @@ void main() {
   vec3 V = normalize(uCamPos - vWorld);
   float alpha = 1.0;
 
-  bool isWater = vKind > 1.5;
+  bool isWater = vKind > 1.5 && vKind < 2.5;
+  bool isLamp = vKind > 2.5;
   if (isWater && N.y > 0.5) {
     // ripple normal from a few travelling sine waves
     vec2 q = vWorld.xz;
@@ -89,7 +94,10 @@ void main() {
   float hemi = N.y > 0.5 ? 1.0 : N.y < -0.5 ? 0.5 : 0.78 + N.y * 0.1;
   float ndl = max(dot(N, uSunDir), 0.0);
   vec3 lighting = (uAmbient * hemi + uSunColor * ndl) * vAO;
+  // warm lamp light, baked per vertex by the mesher
+  lighting += vec3(1.0, 0.72, 0.4) * vLight * 1.3 * vAO;
   vec3 col = albedo * lighting;
+  if (isLamp) col = albedo * 2.2; // self-lit, over-bright so bloom makes it glow
 
   if (isWater) {
     float fres = pow(1.0 - max(dot(N, V), 0.0), 4.0);
@@ -103,7 +111,7 @@ void main() {
 
   // night vision: colours fade toward a cool blue-grey
   float luma = dot(col, vec3(0.2126, 0.7152, 0.0722));
-  col = mix(col, luma * vec3(0.7, 0.85, 1.35), uNight * 0.6);
+  col = mix(col, luma * vec3(0.7, 0.85, 1.35), uNight * 0.6 * (1.0 - min(1.0, vLight * 1.5)) * (isLamp ? 0.0 : 1.0));
 
   // fog that glows warmer toward the sun
   vec3 viewDir = normalize(vWorld - uCamPos);

@@ -1,7 +1,7 @@
 // World storage + generation. Data is column-major: index = (z*W + x)*H + y
 import {
   AIR, GRASS, DIRT, STONE, SAND, LOG, LEAVES, WATER, SNOW, BEDROCK,
-  COAL_ORE, IRON_ORE, GRAVEL, SOLID, COBBLE, PLANKS, GLASS, BRICK,
+  COAL_ORE, IRON_ORE, GRAVEL, SOLID, COBBLE, PLANKS, GLASS, BRICK, BLOCKS,
 } from './blocks.js';
 import { makeNoise2D, makeNoise3D, fbm2, mulberry32 } from './noise.js';
 
@@ -13,6 +13,9 @@ export class World {
   constructor() {
     this.data = new Uint8Array(W * D * H);
     this.tops = new Uint8Array(W * D); // highest non-air y per column (may be stale-high)
+    this.edits = new Map();  // voxel index -> block id, every change the player made (for saving)
+    this.lights = new Set(); // voxel indices of light-emitting blocks (lamps)
+    this.lightChunks = new Map(); // chunk key (cz * W/CS + cx) -> Set of lamp indices in that chunk
   }
 
   get(x, y, z) {
@@ -29,8 +32,34 @@ export class World {
 
   set(x, y, z, b) {
     if (x < 0 || z < 0 || x >= W || z >= D || y < 0 || y >= H) return;
-    this.data[(z * W + x) * H + y] = b;
+    const i = (z * W + x) * H + y;
+    this.data[i] = b;
+    this.edits.set(i, b);
+    const ck = Math.floor(z / CS) * (W / CS) + Math.floor(x / CS);
+    if (BLOCKS[b]?.light) {
+      this.lights.add(i);
+      if (!this.lightChunks.has(ck)) this.lightChunks.set(ck, new Set());
+      this.lightChunks.get(ck).add(i);
+    } else if (this.lights.delete(i)) {
+      const set = this.lightChunks.get(ck);
+      set.delete(i);
+      if (!set.size) this.lightChunks.delete(ck);
+    }
     if (b !== AIR && y > this.tops[z * W + x]) this.tops[z * W + x] = y;
+  }
+
+  /** re-apply saved player edits on top of a freshly generated world; pairs = [[index, id], ...] */
+  applyEdits(pairs) {
+    for (const [i, b] of pairs) {
+      const { x, y, z } = World.coords(i);
+      this.set(x, y, z, b);
+    }
+  }
+
+  /** decode a voxel index back to coordinates */
+  static coords(i) {
+    const y = i % H, col = (i - y) / H;
+    return { x: col % W, y, z: Math.floor(col / W) };
   }
 
   // Voxel DDA raycast. Returns first non-air, non-water block hit.
@@ -57,6 +86,9 @@ export class World {
   async generate(seed, onProgress) {
     const d = this.data;
     d.fill(0);
+    this.edits.clear();
+    this.lights.clear();
+    this.lightChunks.clear();
     const n1 = makeNoise2D(seed), n2 = makeNoise2D(seed + 11), n3 = makeNoise2D(seed + 23);
     const n4 = makeNoise2D(seed + 37), n5 = makeNoise2D(seed + 41);
     const c1 = makeNoise3D(seed + 51), c2 = makeNoise3D(seed + 67);

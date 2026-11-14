@@ -2,7 +2,7 @@
 // Browsers only allow audio after a user gesture, so call unlock() from a click/keypress.
 import {
   GRASS, DIRT, STONE, COBBLE, SAND, LOG, LEAVES, PLANKS, GLASS, BRICK, SNOW, BEDROCK,
-  COAL_ORE, IRON_ORE, GRAVEL,
+  COAL_ORE, IRON_ORE, GRAVEL, LAMP,
 } from './blocks.js';
 
 // block id -> material family
@@ -14,6 +14,7 @@ MAT[SAND] = 'sand';
 MAT[GRAVEL] = 'gravel';
 MAT[SNOW] = 'snow';
 MAT[GLASS] = 'glass';
+MAT[LAMP] = 'glass';
 
 // f = band-pass centre, q = resonance, dur = decay (s), g = loudness, tone = optional pitched knock (Hz)
 const MATS = {
@@ -106,6 +107,15 @@ export class Sound {
     v = Math.min(1, Math.max(0, +v || 0));
     this.volume = v;
     if (this.ctx) this.master.gain.setTargetAtTime(v, this.ctx.currentTime, 0.05);
+  }
+
+  /** pause all audio (hidden tab) / bring it back */
+  suspend() {
+    if (this.ctx && this.ctx.state === 'running') this.ctx.suspend().catch(() => {});
+  }
+
+  resume() {
+    if (this.ctx && this.ctx.state === 'suspended' && !this.disposed) this.ctx.resume().catch(() => {});
   }
 
   setUnderwater(on) {
@@ -217,7 +227,10 @@ export class Sound {
   }
 
   // ---------------- game events ----------------
-  step(id) { this.hit(id, { gain: 0.35, dur: 0.9 }); }
+  step(id) {
+    this.stepSide = !this.stepSide; // left/right feet sound slightly different
+    this.hit(id, { gain: 0.35, dur: 0.9, pitch: this.stepSide ? 1.06 : 0.94 });
+  }
   land(id, strength) { this.hit(id, { gain: 0.5 + Math.min(0.6, strength * 0.12), dur: 1.6, pitch: 0.7 }); }
   mineHit(id) { this.hit(id, { gain: 0.5, dur: 0.8, pitch: 1.15 }); }
 
@@ -287,6 +300,10 @@ export class Sound {
 
   click() { this.tone({ type: 'square', f0: 1400, f1: 1200, dur: 0.025, gain: 0.05 }); }
   invOpen() { this.noise({ f: 1800, q: 0.9, dur: 0.12, gain: 0.25, sweep: 900 }); }
+  craft() {
+    this.pickup();
+    [784, 988, 1175].forEach((f, i) => this.tone({ type: 'triangle', f0: f, dur: 0.16, gain: 0.09, at: 0.05 + i * 0.06 }));
+  }
   invClose() { this.noise({ f: 900, q: 0.9, dur: 0.1, gain: 0.25, sweep: 1800 }); }
 
   fly(on) {

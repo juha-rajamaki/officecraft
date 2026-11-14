@@ -3,6 +3,38 @@ import { useStore } from '../store.js';
 import { clickSlot, HOTBAR, SIZE } from '../game/inventory.js';
 import { itemName } from '../game/blocks.js';
 import { Slot, ItemStack } from './Slot.jsx';
+import { RECIPES, canCraft, craft } from '../game/crafting.js';
+
+function Crafting({ game }) {
+  useStore((s) => s.slots); // re-render when the inventory changes
+  return (
+    <div className="crafting">
+      <h3>Crafting</h3>
+      {RECIPES.map((r) => {
+        const ok = canCraft(r);
+        return (
+          <div key={r.out[0]} className={`recipe${ok ? '' : ' off'}`}>
+            {r.in.map(([id, n]) => (
+              <div key={id} className="slot small" title={itemName(id)}><ItemStack item={{ id, count: n }} /></div>
+            ))}
+            <span className="arrow">→</span>
+            <div className="slot small" title={itemName(r.out[0])}><ItemStack item={{ id: r.out[0], count: r.out[1] }} /></div>
+            <button
+              className="craft-btn"
+              disabled={!ok}
+              title={ok ? `Craft ${itemName(r.out[0])}` : 'Not enough materials or no room'}
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={() => { if (craft(r)) game.current.sound.craft(); }}
+            >
+              Craft
+            </button>
+          </div>
+        );
+      })}
+      <p className="hint">Mine coal & iron ore with a pickaxe.</p>
+    </div>
+  );
+}
 
 export function Inventory({ game }) {
   const slots = useStore((s) => s.slots);
@@ -31,9 +63,14 @@ export function Inventory({ game }) {
           <h2>Inventory</h2>
           <span className="hint">Click: pick up / drop · Right click: split · Shift click: quick move · E: close</span>
         </div>
-        <div className="grid">{backpack}</div>
-        <div className="grid hotrow">
-          {Array.from({ length: HOTBAR }, (_, i) => <Slot key={i} {...slotProps(i)} />)}
+        <div className="inv-body">
+          <div>
+            <div className="grid">{backpack}</div>
+            <div className="grid hotrow">
+              {Array.from({ length: HOTBAR }, (_, i) => <Slot key={i} {...slotProps(i)} />)}
+            </div>
+          </div>
+          <Crafting game={game} />
         </div>
       </div>
       {cursor && (

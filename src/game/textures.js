@@ -1,7 +1,7 @@
 // Procedural 16x16 pixel-art textures drawn into one atlas strip, plus item icons.
 import * as THREE from 'three';
 import { mulberry32 } from './noise.js';
-import { BLOCKS, PICKAXE, SWORD, NT } from './blocks.js';
+import { BLOCKS, ITEMS, PICKAXE, SWORD, IRON_PICKAXE, IRON_SWORD, COAL, IRON, NT } from './blocks.js';
 
 // Sword pixel art (16x16, blade pointing up). Shared by the icon and the 3D hand model.
 export function swordPixels() {
@@ -14,6 +14,52 @@ export function swordPixels() {
   for (let y = 12; y <= 14; y++) px.push([7, y, '#6b4423'], [8, y, '#4e3018']);              // grip
   px.push([7, 15, '#e0b030'], [8, 15, '#b8891c']);                                         // pommel
   return px;
+}
+
+// Pickaxe pixel art (16x16), shared by the icon and the 3D hand model.
+export function pickaxePixels() {
+  const px = new Map();
+  const put = (x, y, c) => px.set(`${x},${y}`, [x, y, c]);
+  for (let y = 4; y < 16; y++) { put(7, y, '#8a5a2b'); put(8, y, '#5e3b19'); }
+  for (let a = -150; a <= -30; a += 2) {
+    const r = (a * Math.PI) / 180;
+    const x = Math.round(8 + 9 * Math.cos(r)), y = Math.round(11 + 9 * Math.sin(r));
+    put(x, y + 1, '#9aa6ab');
+    put(x, y, '#e3ecef');
+  }
+  return [...px.values()];
+}
+
+// iron tools: the same shapes with a blue-steel palette
+const IRON_PAL = {
+  '#e3ecef': '#d4e4ff', '#9aa6ab': '#5f78a8', '#e9f1f4': '#ffffff', '#b9c6cc': '#8ea6d6',
+  '#9fb0b8': '#6c84b4', '#eef5f7': '#e2eeff', '#c9d6dc': '#a6bfea', '#8796a0': '#4d6290',
+};
+const recolor = (px) => px.map(([x, y, c]) => [x, y, IRON_PAL[c] ?? c]);
+
+// a rough round lump: coal (dark, glinting) or iron (rusty-beige nugget)
+function lumpPixels(base, dark, glint, seed) {
+  const r = mulberry32(seed), px = [];
+  for (let y = 3; y < 14; y++) for (let x = 3; x < 14; x++) {
+    const d = Math.hypot(x - 8, (y - 8.5) * 1.15) + r() * 1.2;
+    if (d > 5.6) continue;
+    const c = r() < 0.12 ? glint : d > 4.4 || y > 10 ? dark : base;
+    px.push([x, y, c]);
+  }
+  return px;
+}
+
+/** 16x16 pixel art for every non-block item (tools, coal, iron) */
+export function itemPixels(id) {
+  switch (id) {
+    case PICKAXE: return pickaxePixels();
+    case SWORD: return swordPixels();
+    case IRON_PICKAXE: return recolor(pickaxePixels());
+    case IRON_SWORD: return recolor(swordPixels());
+    case COAL: return lumpPixels('#45454d', '#26262b', '#a9a9bb', 7);
+    case IRON: return lumpPixels('#d8b48e', '#9a7356', '#f3e2cf', 11);
+    default: return [];
+  }
 }
 
 export const TS = 16;   // tile size in px
@@ -95,6 +141,13 @@ paint(15, () => vary([70, 70, 70], 1.0));                               // bedro
 { const m = spots(4, 1.7); paint(16, (x, y) => (m[y * 16 + x] ? vary([30, 30, 30], 0.3) : vary(STONE_C, 0.22))); }
 { const m = spots(4, 1.6); paint(17, (x, y) => (m[y * 16 + x] ? vary([214, 170, 140], 0.15) : vary(STONE_C, 0.22))); }
 paint(18, () => (rnd() < 0.5 ? vary([120, 115, 110], 0.4) : vary([150, 140, 135], 0.3))); // gravel
+paint(19, (x, y) => {                                                   // lamp: iron frame, warm glass
+  if (x === 0 || y === 0 || x === 15 || y === 15) return [52, 44, 40];
+  if (x === 1 || y === 1 || x === 14 || y === 14) return [92, 78, 66];
+  if (x === 7 || x === 8 || y === 7 || y === 8) return [120, 100, 80];  // window bars
+  const d = Math.hypot(x - 7.5, y - 7.5);
+  return vary([255, 214 - d * 6, 120 - d * 8], 0.08);
+});
 
 actx.putImageData(img, 0, 0);
 export const atlasCanvas = atlas;
@@ -202,21 +255,9 @@ function drawCube(g, tex) {
   g.setTransform(1, 0, 0, 1, 0, 0);
 }
 
-function drawPickaxe(g) {
-  const P = (x, y, c) => { g.fillStyle = c; g.fillRect(x, y, 1.05, 1.05); };
-  g.translate(24, 24); g.rotate(Math.PI / 4); g.scale(2.5, 2.5); g.translate(-8, -8);
-  for (let y = 4; y < 16; y++) { P(7, y, '#8a5a2b'); P(8, y, '#5e3b19'); }
-  for (let a = -150; a <= -30; a += 2) {
-    const r = (a * Math.PI) / 180;
-    const x = Math.round(8 + 9 * Math.cos(r)), y = Math.round(11 + 9 * Math.sin(r));
-    P(x, y, '#e3ecef'); P(x, y + 1, '#9aa6ab');
-  }
-  g.setTransform(1, 0, 0, 1, 0, 0);
-}
-
-function drawSword(g) {
-  g.translate(24, 24); g.rotate(Math.PI / 4); g.scale(2.6, 2.6); g.translate(-8, -8);
-  for (const [x, y, c] of swordPixels()) { g.fillStyle = c; g.fillRect(x, y, 1.05, 1.05); }
+function drawPixels(g, pixels, scale, rotate) {
+  g.translate(24, 24); if (rotate) g.rotate(Math.PI / 4); g.scale(scale, scale); g.translate(-8, -8);
+  for (const [x, y, c] of pixels) { g.fillStyle = c; g.fillRect(x, y, 1.05, 1.05); }
   g.setTransform(1, 0, 0, 1, 0, 0);
 }
 
@@ -226,8 +267,8 @@ export function itemIcon(id) {
   c.width = c.height = 48;
   const g = c.getContext('2d');
   g.imageSmoothingEnabled = false;
-  if (id === PICKAXE) drawPickaxe(g);
-  else if (id === SWORD) drawSword(g);
-  else drawCube(g, BLOCKS[id].tex);
+  const item = ITEMS[id];
+  if (item) drawPixels(g, itemPixels(id), item.tool ? 2.55 : 2.7, !!item.tool);
+  else if (BLOCKS[id]) drawCube(g, BLOCKS[id].tex);
   return (iconCache[id] = c.toDataURL());
 }

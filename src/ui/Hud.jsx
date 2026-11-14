@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useStore } from '../store.js';
+import { useStore, toast } from '../store.js';
 import { itemName } from '../game/blocks.js';
 import { Slot } from './Slot.jsx';
 import { Inventory } from './Inventory.jsx';
@@ -105,6 +105,10 @@ function Pause({ game }) {
         <Sensitivity />
         <Volume />
         <PostFxToggle />
+        <div className="save-row" onClick={(e) => e.stopPropagation()} onMouseDown={(e) => e.stopPropagation()}>
+          <button className="btn small secondary" onClick={() => { game.current.save(); toast('Game saved'); }}>Save now</button>
+          <button className="btn small secondary" onClick={() => game.current.exportSave()}>Export save</button>
+        </div>
         <Controls />
       </div>
     </div>

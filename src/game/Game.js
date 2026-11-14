@@ -1,12 +1,12 @@
 // The engine: rendering, chunk streaming, input, mining/placing, day/night.
 import * as THREE from 'three';
 import { World, W, D, H, CS, WATER_LEVEL } from './world.js';
-import { buildChunk } from './mesher.js';
+import { buildChunk, LIGHT_RADIUS } from './mesher.js';
 import { Player, EYE, PW, PH } from './player.js';
 import {
   makeAtlasTexture, makeCrackTextures, makeSunTexture, makeMoonTexture, makeCloudTexture,
 } from './textures.js';
-import { AIR, WATER, LEAVES, BLOCKS, PICKAXE, SWORD, isBlock, itemName } from './blocks.js';
+import { AIR, WATER, BLOCKS, ITEMS, isBlock, isSword, isPickaxe } from './blocks.js';
 import { hashString } from './noise.js';
 import { store, toast } from '../store.js';
 import * as inv from './inventory.js';
@@ -14,6 +14,7 @@ import { Hand } from './hand.js';
 import { Mobs } from './mobs.js';
 import { Enemies } from './enemies.js';
 import { Sound } from './sound.js';
+import { writeSave, downloadSave } from './save.js';
 import { createTerrainMaterials, createSky, GradeShader } from './shaders.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
@@ -23,11 +24,9 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 
 const RD = 8;              // render distance in chunks
 const DAY_LEN = 600;       // seconds per full day
-const MINE_TIME = 0.5;     // seconds to break a block
 const REACH = 5;
 const CX = W / CS, CZ = D / CS;
 const MAX_HP = 20;         // 10 hearts
-const SWORD_DMG = 4;       // a Gloom (12 HP) takes 3 hits
 const SWORD_COOLDOWN = 0.35;
 
 // Time-of-day palette (THREE.Color hex = sRGB, converted to linear automatically)
@@ -40,6 +39,7 @@ const AMB_NIGHT = new THREE.Color().setRGB(0.1, 0.13, 0.23);
 const GLOW = new THREE.Color(0xffc58a);
 const WATER_FOG = new THREE.Color(0x1d3f8a);
 
+const AUTOSAVE_EVERY = 30; // seconds of play between autosaves
 const nextFrame = () => new Promise((r) => setTimeout(r, 0));
 
 export class Game {
@@ -93,6 +93,7 @@ export class Game {
     this.wasInWater = false;
     this.swimT = 0;
     this.mineStage = -1;
+    this.saveTimer = 0;
     this.health = MAX_HP;
     this.sinceHurt = 0;
     this.regenTimer = 0;
@@ -102,6 +103,8 @@ export class Game {
     this.dayAmt = 1;
     this.buildComposer();
     this.clockTime = 0;
+    this._dir = new THREE.Vector3();    // scratch vectors, reused every frame
+    this._sunDir = new THREE.Vector3();
 
     this.keys = new Set();
     this.mouse = { left: false, right: false };
@@ -161,6 +164,7 @@ export class Game {
       const data = [];
       for (let i = 0; i < n; i++) { uv.setXY(i, waterU, 0.5); data.push(1, 3, 2); }
       g.setAttribute('aData', new THREE.Float32BufferAttribute(data, 3));
+      g.setAttribute('aLight', new THREE.Float32BufferAttribute(new Float32Array(n), 1));
       this.scene.add(new THREE.Mesh(g, this.mats.ocean));
     }
   }
@@ -267,9 +271,16 @@ export class Game {
       this.select((s + (e.deltaY > 0 ? 1 : -1) + 9) % 9);
     };
     this.onContext = (e) => e.preventDefault();
+    this.onVisibility = () => {
+      if (document.hidden) { this.sound.suspend(); this.save(); }
+      else this.sound.resume();
+    };
     this.onLockChange = () => {
       this.locked = document.pointerLockElement === this.renderer.domElement;
-      if (!this.locked) { this.keys.clear(); this.mouse.left = this.mouse.right = false; }
+      if (!this.locked) {
+        this.keys.clear(); this.mouse.left = this.mouse.right = false;
+        if (!store.get().inventoryOpen) this.save(); // paused: a good moment to save
+      }
       store.set({ locked: this.locked });
     };
 
@@ -282,6 +293,7 @@ export class Game {
     document.addEventListener('wheel', this.onWheel, { passive: true });
     document.addEventListener('contextmenu', this.onContext);
     document.addEventListener('pointerlockchange', this.onLockChange);
+    document.addEventListener('visibilitychange', this.onVisibility);
   }
 
   dispose() {
@@ -295,6 +307,7 @@ export class Game {
     document.removeEventListener('wheel', this.onWheel);
     document.removeEventListener('contextmenu', this.onContext);
     document.removeEventListener('pointerlockchange', this.onLockChange);
+    document.removeEventListener('visibilitychange', this.onVisibility);
     this.unsubVolume();
     this.sound.dispose();
     this.renderer.dispose();
@@ -302,21 +315,36 @@ export class Game {
   }
 
   // ---------------- public API ----------------
-  async start(seedText) {
+  /** start a new world ({ seedText }) or continue a validated save ({ save }) */
+  async start({ seedText, save } = {}) {
     this.sound.unlock(); // called from the Play click, so audio is allowed
-    const seed = seedText ? hashString(seedText) : (Math.random() * 2 ** 31) | 0;
+    const seed = save ? save.seed : seedText ? hashString(seedText) : (Math.random() * 2 ** 31) | 0;
+    this.seed = seed;
     store.set({ screen: 'loading', progress: 0, status: 'Shaping the land…' });
     await nextFrame();
     await this.world.generate(seed, (progress, status) => store.set({ progress, status }));
+    if (save) {
+      store.set({ status: 'Restoring your changes…' });
+      this.world.applyEdits(save.edits);
+    }
 
-    const s = this.world.findSpawn();
-    this.spawnPoint = { ...s };
+    const s = save ? save.pos : this.world.findSpawn();
+    this.spawnPoint = save ? { ...save.spawn } : { ...s };
     Object.assign(this.player.pos, s);
+    this.player.vel.x = this.player.vel.y = this.player.vel.z = 0;
     this.player.airMaxY = s.y;
-    this.health = MAX_HP;
+    this.health = save ? save.health : MAX_HP;
     this.dead = false;
-    store.set({ health: MAX_HP, dead: false });
-    this.player.yaw = Math.random() * Math.PI * 2;
+    store.set({ health: this.health, dead: false });
+    this.player.yaw = save ? save.yaw : Math.random() * Math.PI * 2;
+    this.player.pitch = save ? save.pitch : 0;
+    if (save) this.time = save.time;
+    if (save) {
+      this.unstick(this.spawnPoint);
+      this.unstick(this.player.pos);
+      this.player.airMaxY = this.player.pos.y;
+    }
+    this.saveTimer = 0;
     this.updateCamera();
 
     store.set({ status: 'Building chunks…' });
@@ -328,11 +356,53 @@ export class Game {
       if (i % 6 === 5) { store.set({ progress: 0.95 + (0.05 * i) / near.length }); await nextFrame(); }
     }
 
-    store.set({ slots: inv.defaultSlots(), selected: 0, cursor: null, inventoryOpen: false, progress: 1 });
+    store.set({
+      slots: save ? save.slots : inv.defaultSlots(),
+      selected: save ? save.selected : 0,
+      cursor: null, inventoryOpen: false, progress: 1,
+    });
     this.mobs.populate(s.x, s.z);
     this.started = true;
     this.updateSky();
     store.set({ screen: 'game' });
+  }
+
+  // ---------------- saving ----------------
+  /** move a loaded position up out of solid blocks (e.g. a save whose spot got built over) */
+  unstick(pos) {
+    const probe = new Player();
+    Object.assign(probe.pos, pos);
+    while (probe.collides(this.world) && probe.pos.y < H + 2) probe.pos.y = Math.floor(probe.pos.y) + 1;
+    pos.y = probe.pos.y;
+  }
+
+  /** a snapshot of everything needed to restore this world */
+  snapshot() {
+    const st = store.get();
+    // an item held by the mouse in the inventory belongs in the save too
+    const slots = st.slots.slice();
+    if (st.cursor) { const j = slots.indexOf(null); if (j >= 0) slots[j] = st.cursor; }
+    const p = this.player.pos;
+    return {
+      v: 1, seed: this.seed, savedAt: Date.now(),
+      edits: [...this.world.edits],
+      slots, selected: st.selected,
+      pos: { x: p.x, y: Math.max(-16, Math.min(H + 60, p.y)), z: p.z }, spawn: { ...this.spawnPoint },
+      yaw: this.player.yaw % (Math.PI * 2), pitch: this.player.pitch,
+      time: this.time, health: Math.max(1, Math.round(this.health)),
+    };
+  }
+
+  save() {
+    if (!this.started || this.dead) return; // a dead player is saved after respawning
+    const st = store.get();
+    if (st.cursor && !st.slots.includes(null)) return; // held stack wouldn't fit in the save; try later
+    this.saveTimer = 0;
+    writeSave(this.snapshot()).then((ok) => { if (!ok && !this.saveWarned) { this.saveWarned = true; toast('Could not save (browser storage blocked?)'); } });
+  }
+
+  exportSave() {
+    if (this.started) downloadSave(this.snapshot());
   }
 
   lock() {
@@ -394,6 +464,7 @@ export class Game {
       geo.setAttribute('position', new THREE.Float32BufferAttribute(b.p, 3));
       geo.setAttribute('uv', new THREE.Float32BufferAttribute(b.uv, 2));
       geo.setAttribute('aData', new THREE.Float32BufferAttribute(b.d, 3));
+      geo.setAttribute('aLight', new THREE.Float32BufferAttribute(b.l, 1));
       geo.setIndex(b.i);
       const m = new THREE.Mesh(geo, this.mats[t]);
       m.matrixAutoUpdate = false;
@@ -425,6 +496,15 @@ export class Game {
       this.buildChunkMesh(cx, cz);
       if (performance.now() - t0 > 6) break;
     }
+  }
+
+  /** rebuild after a block change; lamps light a wider area, so rebuild every chunk they reach */
+  rebuildFor(x, z, id) {
+    if (!BLOCKS[id]?.light) { this.rebuildAround(x, z); return; }
+    const r = LIGHT_RADIUS + 1;
+    for (let cz = Math.floor((z - r) / CS); cz <= Math.floor((z + r) / CS); cz++)
+      for (let cx = Math.floor((x - r) / CS); cx <= Math.floor((x + r) / CS); cx++)
+        if (this.chunks.has(cz * CX + cx)) this.buildChunkMesh(cx, cz);
   }
 
   rebuildAround(x, z) {
@@ -489,6 +569,8 @@ export class Game {
   };
 
   tick(dt) {
+    this.saveTimer += dt;
+    if (this.saveTimer >= AUTOSAVE_EVERY) this.save();
     const k = this.keys;
     const input = this.locked
       ? {
@@ -515,8 +597,7 @@ export class Game {
     this.attackCooldown = Math.max(0, this.attackCooldown - dt);
 
     // what are we looking at?
-    const dir = new THREE.Vector3();
-    this.camera.getWorldDirection(dir);
+    const dir = this.camera.getWorldDirection(this._dir);
     const c = this.camera.position;
     this.target = this.world.raycast(c.x, c.y, c.z, dir.x, dir.y, dir.z, REACH);
 
@@ -534,13 +615,13 @@ export class Game {
     const heldId = st0.slots[st0.selected]?.id;
     if (this.mouse.leftPressed) {
       if (this.enemyTarget) {
-        if (heldId === SWORD) {
+        if (isSword(heldId)) {
           if (this.attackCooldown <= 0) {
             this.attackCooldown = SWORD_COOLDOWN;
             this.hand.swing = 1;
             const e = this.enemyTarget, ep = { x: e.body.pos.x, y: e.body.pos.y + 1, z: e.body.pos.z };
             this.sound.swing();
-            if (this.enemies.damage(e, SWORD_DMG, this.player.pos)) {
+            if (this.enemies.damage(e, ITEMS[heldId].damage, this.player.pos)) {
               this.sound.enemyDie(ep);
               toast('Gloom defeated!');
             } else this.sound.hitEnemy(ep);
@@ -554,7 +635,7 @@ export class Game {
         this.mobs.bonk(this.mobTarget, this.player.pos);
         this.sound.bonk(this.mobTarget.pos);
         this.hand.swing = 1;
-      } else if (heldId === SWORD && this.attackCooldown <= 0) {
+      } else if (isSword(heldId) && this.attackCooldown <= 0) {
         this.attackCooldown = SWORD_COOLDOWN;
         this.sound.swing(); // swing at thin air
       }
@@ -625,6 +706,7 @@ export class Game {
     store.set({ dead: false, flying: false });
     this.sound.respawn();
     this.updateCamera();
+    this.save();
     this.lock();
   }
 
@@ -651,27 +733,29 @@ export class Game {
     const held = st.slots[st.selected];
     const t = this.target;
     if (this.mouse.left && this.locked && t) {
-      if (held?.id === PICKAXE) {
+      if (isPickaxe(held?.id)) {
         if (BLOCKS[t.id].unbreakable) {
           this.mining = null;
           if (!this.warned) { toast('Bedrock is unbreakable'); this.warned = true; }
         } else {
           const m = this.mining;
           if (!m || m.x !== t.x || m.y !== t.y || m.z !== t.z) { this.mining = { x: t.x, y: t.y, z: t.z, t: 0 }; this.mineStage = -1; }
+          // block hardness x tool speed (iron pickaxe = half the time)
+          this.mining.need = BLOCKS[t.id].hardness * ITEMS[held.id].mineMult;
           this.mining.t += dt;
           // a knock on every other crack stage: 4 hits per block
-          const knock = Math.floor((this.mining.t / MINE_TIME) * 4);
+          const knock = Math.floor((this.mining.t / this.mining.need) * 4);
           if (knock !== this.mineStage && knock < 4) { this.mineStage = knock; this.sound.mineHit(t.id); }
-          if (this.mining.t >= MINE_TIME) { this.breakBlock(t); this.mining = null; }
+          if (this.mining.t >= this.mining.need) { this.breakBlock(t); this.mining = null; }
         }
       } else if (!this.warned) {
-        toast('You need the pickaxe to mine!');
+        toast('You need a pickaxe to mine!');
         this.warned = true;
       }
     } else this.mining = null;
 
     if (this.mining) {
-      const stage = Math.min(7, Math.floor((this.mining.t / MINE_TIME) * 8));
+      const stage = Math.min(7, Math.floor((this.mining.t / this.mining.need) * 8));
       this.crack.material.map = this.cracks[stage];
       this.crack.position.set(this.mining.x + 0.5, this.mining.y + 0.5, this.mining.z + 0.5);
       this.crack.visible = true;
@@ -681,7 +765,7 @@ export class Game {
   breakBlock(t) {
     const def = BLOCKS[t.id];
     this.world.set(t.x, t.y, t.z, AIR);
-    this.rebuildAround(t.x, t.z);
+    this.rebuildFor(t.x, t.z, t.id);
     this.sound.breakBlock(t.id);
     const left = inv.addItem(def.drop ?? t.id, 1);
     if (left > 0) toast('Inventory full!');
@@ -706,7 +790,7 @@ export class Game {
     const overlaps = p.x - PW < x + 1 && p.x + PW > x && p.y < y + 1 && p.y + PH > y && p.z - PW < z + 1 && p.z + PW > z;
     if (overlaps) return;
     this.world.set(x, y, z, held.id);
-    this.rebuildAround(x, z);
+    this.rebuildFor(x, z, held.id);
     inv.consumeSelected();
     this.sound.place(held.id);
     this.hand.swing = 1;
@@ -744,13 +828,9 @@ export class Game {
 
   updateAmbience(dt, paused) {
     const p = this.player.pos;
-    // covered = a solid, non-leaf block somewhere above the head (caves, buildings)
-    let covered = false;
+    // covered = the column's top block is above the head (caves, buildings, under trees)
     const x = Math.floor(p.x), z = Math.floor(p.z);
-    for (let y = Math.floor(p.y + PH) + 1, top = Math.min(H, y + 32); y < top; y++) {
-      const b = this.world.get(x, y, z);
-      if (b !== AIR && b !== WATER && b !== LEAVES) { covered = true; break; }
-    }
+    const covered = x >= 0 && z >= 0 && x < W && z < D && this.world.tops[z * W + x] > p.y + PH + 1;
     this.sound.update(dt, {
       height: p.y,
       night: 1 - this.dayAmt,
@@ -768,7 +848,7 @@ export class Game {
     this.light = light;
     this.dayAmt = day;
     const u = this.u;
-    const dir = new THREE.Vector3(c, s, 0.35).normalize();
+    const dir = this._sunDir.set(c, s, 0.35).normalize();
 
     // main light: the sun by day, the moon by night (both fade to 0 at the horizon, so the swap is invisible)
     if (s > -0.02) {

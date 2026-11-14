@@ -20,7 +20,12 @@ export default function App() {
   return (
     <>
       <div ref={mount} className="game-root" />
-      {screen === 'menu' && <StartScreen onPlay={(seed) => game.current.start(seed)} />}
+      {screen === 'menu' && (
+        <StartScreen
+          onPlay={(seedText) => game.current.start({ seedText })}
+          onContinue={(save) => game.current.start({ save })}
+        />
+      )}
       {screen === 'loading' && <LoadingScreen />}
       {screen === 'game' && <Hud game={game} />}
     </>
