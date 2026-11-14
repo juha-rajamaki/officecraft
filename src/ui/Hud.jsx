@@ -4,7 +4,7 @@ import { itemName } from '../game/blocks.js';
 import { Slot } from './Slot.jsx';
 import { Inventory } from './Inventory.jsx';
 import { Controls } from './Controls.jsx';
-import { Sensitivity, PostFxToggle } from './Sensitivity.jsx';
+import { Sensitivity, PostFxToggle, Volume } from './Sensitivity.jsx';
 
 function Hotbar() {
   const slots = useStore((s) => s.slots);
@@ -103,6 +103,7 @@ function Pause({ game }) {
         <h2>Paused</h2>
         <p className="click">Click to play</p>
         <Sensitivity />
+        <Volume />
         <PostFxToggle />
         <Controls />
       </div>

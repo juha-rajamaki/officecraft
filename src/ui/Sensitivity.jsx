@@ -1,4 +1,22 @@
-import { useStore, setSensitivity, setPostfx } from '../store.js';
+import { useStore, setSensitivity, setPostfx, setVolume } from '../store.js';
+
+export function Volume() {
+  const value = useStore((s) => s.volume);
+  return (
+    <label className="sens" onClick={(e) => e.stopPropagation()} onMouseDown={(e) => e.stopPropagation()}>
+      <span>Sound volume</span>
+      <input
+        type="range"
+        min="0"
+        max="1"
+        step="0.05"
+        value={value}
+        onChange={(e) => setVolume(parseFloat(e.target.value))}
+      />
+      <b>{value === 0 ? 'OFF' : `${Math.round(value * 100)}%`}</b>
+    </label>
+  );
+}
 
 export function PostFxToggle() {
   const on = useStore((s) => s.postfx);

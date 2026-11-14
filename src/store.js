@@ -35,7 +35,24 @@ export const store = createStore({
   dead: false,
   sensitivity: loadSensitivity(), // 0.2 – 3, multiplier on mouse look
   postfx: loadFlag('officecraft.postfx', true), // bloom + colour grading
+  volume: loadVolume(),  // 0 – 1, master sound volume
 });
+
+function loadVolume() {
+  try {
+    const raw = localStorage.getItem('officecraft.volume');
+    const v = raw === null ? NaN : parseFloat(raw);
+    return v >= 0 && v <= 1 ? v : 0.7;
+  } catch {
+    return 0.7;
+  }
+}
+
+export function setVolume(v) {
+  v = Math.min(1, Math.max(0, +v || 0));
+  store.set({ volume: v });
+  try { localStorage.setItem('officecraft.volume', String(v)); } catch { /* ignore */ }
+}
 
 function loadFlag(key, fallback) {
   try {

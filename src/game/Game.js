@@ -6,13 +6,14 @@ import { Player, EYE, PW, PH } from './player.js';
 import {
   makeAtlasTexture, makeCrackTextures, makeSunTexture, makeMoonTexture, makeCloudTexture,
 } from './textures.js';
-import { AIR, WATER, BLOCKS, PICKAXE, SWORD, isBlock, itemName } from './blocks.js';
+import { AIR, WATER, LEAVES, BLOCKS, PICKAXE, SWORD, isBlock, itemName } from './blocks.js';
 import { hashString } from './noise.js';
 import { store, toast } from '../store.js';
 import * as inv from './inventory.js';
 import { Hand } from './hand.js';
 import { Mobs } from './mobs.js';
 import { Enemies } from './enemies.js';
+import { Sound } from './sound.js';
 import { createTerrainMaterials, createSky, GradeShader } from './shaders.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
@@ -80,6 +81,18 @@ export class Game {
     this.mobTarget = null;
     this.enemies = new Enemies(this.scene, this.world);
     this.enemyTarget = null;
+    this.sound = new Sound(store.get().volume);
+    this.mobs.sfx = this.sound;
+    this.enemies.sfx = this.sound;
+    this.unsubVolume = store.subscribe(() => {
+      const v = store.get().volume;
+      if (v !== this.sound.volume) this.sound.setVolume(v);
+    });
+    this.stepDist = 0;
+    this.wasOnGround = true;
+    this.wasInWater = false;
+    this.swimT = 0;
+    this.mineStage = -1;
     this.health = MAX_HP;
     this.sinceHurt = 0;
     this.regenTimer = 0;
@@ -217,6 +230,7 @@ export class Game {
     };
     this.onKeyDown = (e) => {
       if (store.get().screen !== 'game') return;
+      this.sound.unlock();
       if (e.code === 'KeyE') { this.toggleInventory(); return; }
       if (store.get().inventoryOpen) {
         if (e.code === 'Escape') this.closeInventory(false);
@@ -238,6 +252,7 @@ export class Game {
       this.player.pitch = Math.max(-Math.PI / 2 + 0.01, Math.min(Math.PI / 2 - 0.01, this.player.pitch));
     };
     this.onMouseDown = (e) => {
+      if (store.get().screen === 'game') this.sound.unlock();
       if (!this.locked) return;
       if (e.button === 0) { this.mouse.left = true; this.mouse.leftPressed = true; }
       if (e.button === 2) { this.mouse.right = true; this.placeCooldown = 0; }
@@ -280,12 +295,15 @@ export class Game {
     document.removeEventListener('wheel', this.onWheel);
     document.removeEventListener('contextmenu', this.onContext);
     document.removeEventListener('pointerlockchange', this.onLockChange);
+    this.unsubVolume();
+    this.sound.dispose();
     this.renderer.dispose();
     this.renderer.domElement.remove();
   }
 
   // ---------------- public API ----------------
   async start(seedText) {
+    this.sound.unlock(); // called from the Play click, so audio is allowed
     const seed = seedText ? hashString(seedText) : (Math.random() * 2 ** 31) | 0;
     store.set({ screen: 'loading', progress: 0, status: 'Shaping the land…' });
     await nextFrame();
@@ -318,11 +336,13 @@ export class Game {
   }
 
   lock() {
+    this.sound.unlock();
     const p = this.renderer.domElement.requestPointerLock();
     if (p && p.catch) p.catch(() => {});
   }
 
   select(i) {
+    if (i !== store.get().selected) this.sound.click();
     store.set({ selected: i });
   }
 
@@ -337,6 +357,7 @@ export class Game {
       p.flying = !p.flying;
       p.vel.y = p.flying ? 0 : p.vel.y;
       store.set({ flying: p.flying });
+      this.sound.fly(p.flying);
       toast(p.flying ? 'Flying ON  (Space up · Shift down)' : 'Flying OFF');
     }
   }
@@ -347,6 +368,7 @@ export class Game {
       this.keys.clear();
       this.mouse.left = this.mouse.right = false;
       store.set({ inventoryOpen: true });
+      this.sound.invOpen();
       document.exitPointerLock();
     }
   }
@@ -354,6 +376,7 @@ export class Game {
   closeInventory(relock) {
     inv.returnCursor();
     store.set({ inventoryOpen: false });
+    this.sound.invClose();
     if (relock) this.lock();
   }
 
@@ -425,6 +448,7 @@ export class Game {
       const st = store.get();
       const paused = (!this.locked && !st.inventoryOpen) || this.dead;
       if (!paused) this.tick(dt);
+      this.updateAmbience(dt, paused);
       this.updateChunks();
       this.updateHand(dt);
     }
@@ -474,8 +498,10 @@ export class Game {
           sprint: k.has('ShiftLeft') || k.has('ShiftRight'),
         }
       : { forward: 0, strafe: 0, jump: false, sprint: false };
-    this.player.update(dt, input, this.world);
+    const inWater = this.player.update(dt, input, this.world);
     this.updateCamera();
+    this.sound.setListener(this.player.pos, EYE, this.player.yaw);
+    this.movementSounds(dt, input, inWater);
 
     // fall damage: 1 HP per block beyond 3
     if (this.player.lastFall > 3.5) this.hurt(Math.floor(this.player.lastFall - 3), null);
@@ -512,15 +538,25 @@ export class Game {
           if (this.attackCooldown <= 0) {
             this.attackCooldown = SWORD_COOLDOWN;
             this.hand.swing = 1;
-            if (this.enemies.damage(this.enemyTarget, SWORD_DMG, this.player.pos)) toast('Gloom defeated!');
+            const e = this.enemyTarget, ep = { x: e.body.pos.x, y: e.body.pos.y + 1, z: e.body.pos.z };
+            this.sound.swing();
+            if (this.enemies.damage(e, SWORD_DMG, this.player.pos)) {
+              this.sound.enemyDie(ep);
+              toast('Gloom defeated!');
+            } else this.sound.hitEnemy(ep);
           }
         } else {
           this.hand.swing = 1;
+          this.sound.swing();
           toast('Only a sword can hurt the Gloom!');
         }
       } else if (this.mobTarget) {
         this.mobs.bonk(this.mobTarget, this.player.pos);
+        this.sound.bonk(this.mobTarget.pos);
         this.hand.swing = 1;
+      } else if (heldId === SWORD && this.attackCooldown <= 0) {
+        this.attackCooldown = SWORD_COOLDOWN;
+        this.sound.swing(); // swing at thin air
       }
     }
     this.mouse.leftPressed = false;
@@ -555,6 +591,7 @@ export class Game {
     this.sinceHurt = 0;
     this.regenTimer = 0;
     store.set({ hurtId: (store.get().hurtId || 0) + 1 });
+    this.sound.hurt();
     if (from) {
       const p = this.player.pos;
       const dx = p.x - from.x, dz = p.z - from.z, l = Math.hypot(dx, dz) || 1;
@@ -567,6 +604,7 @@ export class Game {
 
   die() {
     this.dead = true;
+    this.sound.death();
     this.mouse.left = this.mouse.right = false;
     this.keys.clear();
     store.set({ dead: true, inventoryOpen: false });
@@ -585,6 +623,7 @@ export class Game {
     this.sinceHurt = 0;
     this.setHealth(MAX_HP);
     store.set({ dead: false, flying: false });
+    this.sound.respawn();
     this.updateCamera();
     this.lock();
   }
@@ -618,8 +657,11 @@ export class Game {
           if (!this.warned) { toast('Bedrock is unbreakable'); this.warned = true; }
         } else {
           const m = this.mining;
-          if (!m || m.x !== t.x || m.y !== t.y || m.z !== t.z) this.mining = { x: t.x, y: t.y, z: t.z, t: 0 };
+          if (!m || m.x !== t.x || m.y !== t.y || m.z !== t.z) { this.mining = { x: t.x, y: t.y, z: t.z, t: 0 }; this.mineStage = -1; }
           this.mining.t += dt;
+          // a knock on every other crack stage: 4 hits per block
+          const knock = Math.floor((this.mining.t / MINE_TIME) * 4);
+          if (knock !== this.mineStage && knock < 4) { this.mineStage = knock; this.sound.mineHit(t.id); }
           if (this.mining.t >= MINE_TIME) { this.breakBlock(t); this.mining = null; }
         }
       } else if (!this.warned) {
@@ -640,8 +682,10 @@ export class Game {
     const def = BLOCKS[t.id];
     this.world.set(t.x, t.y, t.z, AIR);
     this.rebuildAround(t.x, t.z);
+    this.sound.breakBlock(t.id);
     const left = inv.addItem(def.drop ?? t.id, 1);
     if (left > 0) toast('Inventory full!');
+    else this.sound.pickup();
   }
 
   updatePlacing(dt) {
@@ -664,7 +708,55 @@ export class Game {
     this.world.set(x, y, z, held.id);
     this.rebuildAround(x, z);
     inv.consumeSelected();
+    this.sound.place(held.id);
     this.hand.swing = 1;
+  }
+
+  // ---------------- sound ----------------
+  blockUnderFeet() {
+    const p = this.player.pos;
+    return this.world.get(Math.floor(p.x), Math.floor(p.y - 0.1), Math.floor(p.z));
+  }
+
+  movementSounds(dt, input, inWater) {
+    const p = this.player;
+    const speed = Math.hypot(p.vel.x, p.vel.z);
+    this.splashT = Math.max(0, (this.splashT || 0) - dt);
+    // cooldown stops a splash every few frames while bobbing at the surface
+    if (inWater && !this.wasInWater && this.splashT <= 0) {
+      this.splashT = 0.8;
+      this.sound.splash(Math.min(1.5, Math.abs(p.vel.y) / 6 + 0.3));
+    }
+    else if (inWater && (speed > 1 || input.jump)) {
+      this.swimT -= dt;
+      if (this.swimT <= 0) { this.swimT = 0.55; this.sound.swim(); }
+    }
+    this.wasInWater = inWater;
+
+    if (p.onGround && !p.flying && !inWater) {
+      const under = this.blockUnderFeet();
+      if (!this.wasOnGround && p.lastFall > 0.8) { this.sound.land(under, p.lastFall); this.stepDist = 0; }
+      this.stepDist += speed * dt;
+      if (this.stepDist >= 2.1) { this.stepDist = 0; if (under) this.sound.step(under); }
+    }
+    this.wasOnGround = p.onGround;
+  }
+
+  updateAmbience(dt, paused) {
+    const p = this.player.pos;
+    // covered = a solid, non-leaf block somewhere above the head (caves, buildings)
+    let covered = false;
+    const x = Math.floor(p.x), z = Math.floor(p.z);
+    for (let y = Math.floor(p.y + PH) + 1, top = Math.min(H, y + 32); y < top; y++) {
+      const b = this.world.get(x, y, z);
+      if (b !== AIR && b !== WATER && b !== LEAVES) { covered = true; break; }
+    }
+    this.sound.update(dt, {
+      height: p.y,
+      night: 1 - this.dayAmt,
+      paused: paused || this.underwater,
+      underground: covered,
+    });
   }
 
   updateSky() {
@@ -715,7 +807,11 @@ export class Game {
     u.uFogFar.value = this.fog.far;
     this.sky.mesh.visible = !underwater;
     this.renderer.setClearColor(this.fog.color);
-    if (underwater !== this.underwater) { this.underwater = underwater; store.set({ underwater }); }
+    if (underwater !== this.underwater) {
+      this.underwater = underwater;
+      this.sound.setUnderwater(underwater);
+      store.set({ underwater });
+    }
 
     // clouds pick up sunset colour and darken at night
     this.clouds.material.color.setRGB(1, 1, 1).lerp(SUN_SET, sunset * 0.45).multiplyScalar(0.12 + 0.88 * day);

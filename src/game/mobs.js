@@ -185,6 +185,7 @@ export class Mobs {
             m.vel.set(Math.sin(hopDir) * sp, 7.4, Math.cos(hopDir) * sp);
             m.onGround = false;
             m.squash = -0.35; // stretch on take-off
+            if (dist < 16) this.sfx?.hop(m.pos);
           }
           m.hopTimer = (0.6 + this.rnd() * 2.2) / eager;
         }

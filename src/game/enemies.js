@@ -161,7 +161,11 @@ export class Enemies {
         continue;
       }
       // surface Glooms dissolve in daylight
-      if (!e.underground && day > 0.6) { e.dying = 0.6; continue; }
+      if (!e.underground && day > 0.6) {
+        e.dying = 0.6;
+        this.sfx?.enemyDie({ x: b.pos.x, y: b.pos.y + 1, z: b.pos.z }, true);
+        continue;
+      }
 
       e.cooldown = Math.max(0, e.cooldown - dt);
       e.hurt = Math.max(0, e.hurt - dt);
@@ -170,6 +174,13 @@ export class Enemies {
       // --- brain ---
       let forward = 0, jump = false;
       const chasing = dist < AGGRO && Math.abs(dy) < 8;
+      if (chasing && e.stun <= 0) {
+        e.growlT = (e.growlT ?? this.rnd() * 2) - dt;
+        if (e.growlT <= 0) {
+          e.growlT = 3 + this.rnd() * 4;
+          this.sfx?.growl({ x: b.pos.x, y: b.pos.y + 1.5, z: b.pos.z });
+        }
+      }
       if (e.stun > 0) {
         forward = 0;
       } else if (chasing) {
@@ -179,6 +190,7 @@ export class Enemies {
         if (dist < ATTACK_RANGE && Math.abs(dy) < 1.6 && e.cooldown <= 0) {
           e.cooldown = ATTACK_COOLDOWN;
           e.lunge = 0.25;
+          this.sfx?.enemyAttack({ x: b.pos.x, y: b.pos.y + 1.5, z: b.pos.z });
           onHit(ATTACK_DMG, b.pos);
         }
       } else {
