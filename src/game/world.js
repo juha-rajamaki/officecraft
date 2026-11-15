@@ -1,11 +1,23 @@
 // World storage + generation. Data is column-major: index = (z*W + x)*H + y
+// The world is four maps of R x R blocks in a 2x2 grid, joined by bridges where sea lies between them.
 import {
   AIR, GRASS, DIRT, STONE, SAND, LOG, LEAVES, WATER, SNOW, BEDROCK,
-  COAL_ORE, IRON_ORE, GRAVEL, SOLID, COBBLE, PLANKS, GLASS, BRICK, BLOCKS,
+  COAL_ORE, IRON_ORE, GOLD_ORE, DIAMOND_ORE, GRAVEL, SOLID, COBBLE, PLANKS, GLASS, BRICK, BLOCKS,
 } from './blocks.js';
 import { makeNoise2D, makeNoise3D, fbm2, mulberry32 } from './noise.js';
 
-export const W = 512, D = 512, H = 96, CS = 16, WATER_LEVEL = 32;
+export const R = 512;                       // size of one map
+export const W = R * 2, D = R * 2, H = 96, CS = 16, WATER_LEVEL = 32;
+
+// the four maps; ox/oz = corner of the map in world blocks
+export const REGIONS = [
+  { name: 'Green Hills', kind: 'hills', ox: 0, oz: 0 },
+  { name: 'Flatlands', kind: 'flat', ox: R, oz: 0 },
+  { name: 'Archipelago', kind: 'islands', ox: 0, oz: R },
+  { name: 'Desert', kind: 'desert', ox: R, oz: R },
+];
+/** which map a world position is on */
+export const regionAt = (x, z) => REGIONS[(z >= R ? 2 : 0) + (x >= R ? 1 : 0)];
 
 const yieldFrame = () => new Promise((r) => setTimeout(r, 0));
 
@@ -16,6 +28,7 @@ export class World {
     this.edits = new Map();  // voxel index -> block id, every change the player made (for saving)
     this.lights = new Set(); // voxel indices of light-emitting blocks (lamps)
     this.lightChunks = new Map(); // chunk key (cz * W/CS + cx) -> Set of lamp indices in that chunk
+    this.chests = new Map(); // voxel index -> array of CHEST_SIZE slots
   }
 
   get(x, y, z) {
@@ -84,21 +97,129 @@ export class World {
   }
 
   async generate(seed, onProgress) {
-    const d = this.data;
-    d.fill(0);
+    this.data.fill(0);
     this.edits.clear();
     this.lights.clear();
     this.lightChunks.clear();
+    this.chests.clear();
+    const heights = new Int16Array(W * D);
+    const gen = new RegionGen();
+    for (let r = 0; r < REGIONS.length; r++) {
+      const reg = REGIONS[r];
+      const report = (f, msg) => onProgress?.(((r + Math.min(1, f)) / REGIONS.length) * 0.9, `${reg.name}: ${msg}`);
+      gen.data.fill(0);
+      if (reg.kind === 'hills') await gen.hills(seed, report);
+      else await gen.custom(seed + 1000 * r, reg, report);
+      // copy the map into its place in the world
+      for (let z = 0; z < R; z++) for (let x = 0; x < R; x++) {
+        const src = (z * R + x) * H;
+        this.data.set(gen.data.subarray(src, src + H), ((reg.oz + z) * W + reg.ox + x) * H);
+        heights[(reg.oz + z) * W + reg.ox + x] = gen.heights[z * R + x];
+      }
+    }
+
+    onProgress?.(0.92, 'Building bridges…');
+    await yieldFrame();
+    const c = R / 2;
+    this.bridge(heights, c, c, R + c, c);         // Green Hills - Flatlands
+    this.bridge(heights, c, c, c, R + c);         // Green Hills - Archipelago
+    this.bridge(heights, c, R + c, R + c, R + c); // Archipelago - Desert
+    this.bridge(heights, R + c, c, R + c, R + c); // Flatlands - Desert
+
+    // --- column tops for the mesher ---
+    for (let i = 0; i < W * D; i++) {
+      let y = H - 1;
+      const col = i * H;
+      while (y > 0 && this.data[col + y] === AIR) y--;
+      this.tops[i] = y;
+    }
+    this.heights = heights;
+    onProgress?.(0.95, 'Almost there…');
+  }
+
+  /** a 3-wide plank bridge on cobblestone posts over every stretch of water on the straight line a -> b,
+   *  with steps cut into the shore wherever the land is more than a jump above the deck */
+  bridge(heights, ax, az, bx, bz) {
+    const deck = WATER_LEVEL + 2;
+    const len = Math.max(Math.abs(bx - ax), Math.abs(bz - az));
+    const dx = (bx - ax) / len, dz = (bz - az) / len;
+    const px = Math.round(-dz), pz = Math.round(dx); // sideways (bridges run along x or z)
+    const pts = [];
+    for (let i = 0; i <= len; i++) pts.push([Math.round(ax + dx * i), Math.round(az + dz * i)]);
+    const wet = pts.map(([x, z]) => heights[z * W + x] <= WATER_LEVEL);
+
+    let run = 0;
+    pts.forEach(([cx, cz], i) => {
+      if (!wet[i]) { run = 0; return; }
+      run++;
+      for (let s = -1; s <= 1; s++) {
+        const col = ((cz + pz * s) * W + cx + px * s) * H;
+        this.data[col + deck] = PLANKS;
+        for (let y = deck + 1; y <= deck + 3; y++) this.data[col + y] = AIR;
+        if (s !== 0 && run % 8 === 4) {
+          for (let y = deck - 1; y > 0 && (this.data[col + y] === WATER || this.data[col + y] === AIR); y--) this.data[col + y] = COBBLE;
+          this.data[col + deck + 1] = LOG; // a railing post
+        }
+      }
+    });
+
+    // cut a staircase into a shore that is too high to step onto
+    const steps = (from, dir) => {
+      let level = deck;
+      for (let j = from; j >= 0 && j < pts.length && !wet[j]; j += dir) {
+        const [cx, cz] = pts[j];
+        const hh = heights[cz * W + cx];
+        if (hh <= level + 1) return;
+        level++;
+        for (let s = -1; s <= 1; s++) {
+          const col = ((cz + pz * s) * W + cx + px * s) * H;
+          this.data[col + level] = COBBLE;
+          for (let y = level + 1; y <= Math.max(hh, level + 3) && y < H; y++) this.data[col + y] = AIR;
+        }
+      }
+    };
+    for (let i = 1; i < pts.length; i++) {
+      if (wet[i - 1] && !wet[i]) steps(i, 1);
+      if (!wet[i - 1] && wet[i]) steps(i - 1, -1);
+    }
+  }
+
+  /** a grassy spot near the middle of the Green Hills (the same place older versions used) */
+  findSpawn() {
+    const cx = R / 2, cz = R / 2;
+    for (let r = 0; r < R / 2; r += 2) {
+      for (let k = 0; k < 24; k++) {
+        const a = (k / 24) * Math.PI * 2;
+        const x = Math.floor(cx + Math.cos(a) * r), z = Math.floor(cz + Math.sin(a) * r);
+        const y = this.tops[z * W + x];
+        if (this.get(x, y, z) === GRASS) return { x: x + 0.5, y: y + 1, z: z + 0.5 };
+      }
+    }
+    return { x: cx + 0.5, y: H - 4, z: cz + 0.5 };
+  }
+}
+
+
+// Generates one R x R map into its own buffer; World.generate copies it into place.
+class RegionGen {
+  constructor() {
+    this.data = new Uint8Array(R * R * H);
+    this.heights = new Int16Array(R * R);
+  }
+
+  /** the original island: kept exactly as it was, so older saves line up with their world */
+  async hills(seed, onProgress) {
+    const d = this.data;
     const n1 = makeNoise2D(seed), n2 = makeNoise2D(seed + 11), n3 = makeNoise2D(seed + 23);
     const n4 = makeNoise2D(seed + 37), n5 = makeNoise2D(seed + 41);
     const c1 = makeNoise3D(seed + 51), c2 = makeNoise3D(seed + 67);
     const rnd = mulberry32(seed ^ 0x9e3779b9);
-    const heights = new Int16Array(W * D);
+    const heights = new Int16Array(R * R);
 
-    for (let z = 0; z < D; z++) {
-      for (let x = 0; x < W; x++) {
+    for (let z = 0; z < R; z++) {
+      for (let x = 0; x < R; x++) {
         // --- height ---
-        const e = Math.min(x, z, W - 1 - x, D - 1 - z);
+        const e = Math.min(x, z, R - 1 - x, R - 1 - z);
         const t = Math.min(1, e / 64);
         const edge = t * t * (3 - 2 * t); // smoothstep falloff -> island
         const base = fbm2(n1, x / 110, z / 110, 4);
@@ -108,10 +229,10 @@ export class World {
         const seabed = WATER_LEVEL - 14;
         h = seabed + (h - seabed) * edge;
         h = Math.max(4, Math.min(H - 16, Math.floor(h)));
-        heights[z * W + x] = h;
+        heights[z * R + x] = h;
 
         // --- layers ---
-        const col = (z * W + x) * H;
+        const col = (z * R + x) * H;
         const beach = h <= WATER_LEVEL + 1;
         const deep = h < WATER_LEVEL - 5;
         const snowLine = 66 + Math.floor(n4(x / 12, z / 12) * 5);
@@ -139,7 +260,7 @@ export class World {
         }
       }
       if ((z & 15) === 15) {
-        onProgress?.((z / D) * 0.85, 'Shaping the land…');
+        onProgress?.((z / R) * 0.85, 'Shaping the land…');
         await yieldFrame();
       }
     }
@@ -148,14 +269,31 @@ export class World {
     onProgress?.(0.86, 'Burying ores…');
     await yieldFrame();
     for (let i = 0; i < 14000; i++) {
-      let x = Math.floor(rnd() * W), z = Math.floor(rnd() * D), y = 3 + Math.floor(rnd() * 55);
+      let x = Math.floor(rnd() * R), z = Math.floor(rnd() * R), y = 3 + Math.floor(rnd() * 55);
       const ore = y < 28 && rnd() < 0.35 ? IRON_ORE : COAL_ORE;
       const n = 3 + Math.floor(rnd() * 6);
       for (let k = 0; k < n; k++) {
-        if (x >= 0 && z >= 0 && x < W && z < D && y > 0 && y < H && d[(z * W + x) * H + y] === STONE)
-          d[(z * W + x) * H + y] = ore;
+        if (x >= 0 && z >= 0 && x < R && z < R && y > 0 && y < H && d[(z * R + x) * H + y] === STONE)
+          d[(z * R + x) * H + y] = ore;
         const dir = Math.floor(rnd() * 3);
         const s = rnd() < 0.5 ? -1 : 1;
+        if (dir === 0) x += s; else if (dir === 1) y += s; else z += s;
+      }
+    }
+
+    // --- rare deep ores: their own random stream, so older worlds keep the same trees and buildings ---
+    const rare = mulberry32(seed ^ 0x51ed270b);
+    for (let i = 0; i < 2600; i++) {
+      let x = Math.floor(rare() * R), z = Math.floor(rare() * R);
+      const diamond = rare() < 0.35;
+      let y = 3 + Math.floor(rare() * (diamond ? 14 : 24));
+      const ore = diamond ? DIAMOND_ORE : GOLD_ORE;
+      const n = 2 + Math.floor(rare() * (diamond ? 3 : 5));
+      for (let k = 0; k < n; k++) {
+        if (x >= 0 && z >= 0 && x < R && z < R && y > 0 && y < H && d[(z * R + x) * H + y] === STONE)
+          d[(z * R + x) * H + y] = ore;
+        const dir = Math.floor(rare() * 3);
+        const s = rare() < 0.5 ? -1 : 1;
         if (dir === 0) x += s; else if (dir === 1) y += s; else z += s;
       }
     }
@@ -163,10 +301,10 @@ export class World {
     // --- trees (denser in forest patches) ---
     onProgress?.(0.9, 'Planting trees…');
     await yieldFrame();
-    for (let z = 3; z < D - 3; z++) {
-      for (let x = 3; x < W - 3; x++) {
-        const h = heights[z * W + x];
-        if (d[(z * W + x) * H + h] !== GRASS || d[(z * W + x) * H + h + 1] !== AIR) continue;
+    for (let z = 3; z < R - 3; z++) {
+      for (let x = 3; x < R - 3; x++) {
+        const h = heights[z * R + x];
+        if (d[(z * R + x) * H + h] !== GRASS || d[(z * R + x) * H + h + 1] !== AIR) continue;
         const forest = Math.max(0, fbm2(n5, x / 70, z / 70, 2));
         if (rnd() < 0.002 + forest * 0.06) this.placeTree(x, h, z, rnd);
       }
@@ -177,15 +315,7 @@ export class World {
     await yieldFrame();
     this.placeStructures(heights, rnd);
 
-    // --- column tops for the mesher ---
-    for (let i = 0; i < W * D; i++) {
-      let y = H - 1;
-      const col = i * H;
-      while (y > 0 && d[col + y] === AIR) y--;
-      this.tops[i] = y;
-    }
     this.heights = heights;
-    onProgress?.(0.95, 'Almost there…');
   }
 
   placeTree(x, y, z, rnd) {
@@ -193,40 +323,40 @@ export class World {
     const th = 4 + Math.floor(rnd() * 3);
     if (y + th + 2 >= H) return;
     // don't grow into another tree's trunk
-    for (let i = 1; i <= th + 1; i++) if (d[(z * W + x) * H + y + i] !== AIR && d[(z * W + x) * H + y + i] !== LEAVES) return;
-    for (let i = 1; i <= th; i++) d[(z * W + x) * H + y + i] = LOG;
+    for (let i = 1; i <= th + 1; i++) if (d[(z * R + x) * H + y + i] !== AIR && d[(z * R + x) * H + y + i] !== LEAVES) return;
+    for (let i = 1; i <= th; i++) d[(z * R + x) * H + y + i] = LOG;
     const top = y + th;
     for (let dy = -2; dy <= 1; dy++) {
       const rad = dy <= -1 ? 2 : 1;
       for (let dz = -rad; dz <= rad; dz++) for (let dx = -rad; dx <= rad; dx++) {
         if (Math.abs(dx) === rad && Math.abs(dz) === rad && (dy === 1 || rnd() < 0.5)) continue;
-        const i = ((z + dz) * W + (x + dx)) * H + top + dy;
+        const i = ((z + dz) * R + (x + dx)) * H + top + dy;
         if (d[i] === AIR) d[i] = LEAVES;
       }
     }
   }
 
   setRaw(x, y, z, b) {
-    if (x < 0 || z < 0 || x >= W || z >= D || y < 1 || y >= H) return;
-    this.data[(z * W + x) * H + y] = b;
+    if (x < 0 || z < 0 || x >= R || z >= R || y < 1 || y >= H) return;
+    this.data[(z * R + x) * H + y] = b;
   }
 
-  placeStructures(heights, rnd) {
+  placeStructures(heights, rnd, ground = GRASS, counts = [26, 10]) {
     const placed = [];
     const tryPlace = (size, minGap) => {
       for (let attempt = 0; attempt < 60; attempt++) {
-        const x0 = 24 + Math.floor(rnd() * (W - 48 - size));
-        const z0 = 24 + Math.floor(rnd() * (D - 48 - size));
+        const x0 = 24 + Math.floor(rnd() * (R - 48 - size));
+        const z0 = 24 + Math.floor(rnd() * (R - 48 - size));
         const cx = x0 + (size >> 1), cz = z0 + (size >> 1);
         if (placed.some(([px, pz]) => Math.hypot(px - cx, pz - cz) < minGap)) continue;
         let lo = 999, hi = -1;
         for (let z = z0; z < z0 + size; z++) for (let x = x0; x < x0 + size; x++) {
-          const h = heights[z * W + x];
+          const h = heights[z * R + x];
           lo = Math.min(lo, h); hi = Math.max(hi, h);
         }
-        const base = heights[cz * W + cx];
+        const base = heights[cz * R + cx];
         if (hi - lo > 2 || lo <= WATER_LEVEL + 1 || base > H - 20) continue;
-        if (this.data[(cz * W + cx) * H + base] !== GRASS) continue;
+        if (this.data[(cz * R + cx) * H + base] !== ground) continue;
         placed.push([cx, cz]);
         return { x0, z0, base };
       }
@@ -239,15 +369,15 @@ export class World {
         const inside = x >= x0 && x < x0 + sx && z >= z0 && z < z0 + sz;
         for (let y = base + 1; y <= base + clearH; y++) this.setRaw(x, y, z, AIR);
         if (inside) for (let y = base; y > base - 6; y--) {
-          const cur = this.data[(z * W + x) * H + y];
+          const cur = this.data[(z * R + x) * H + y];
           if (y < base && cur !== AIR && cur !== WATER) break;
           this.setRaw(x, y, z, COBBLE);
-        } else if (this.data[(z * W + x) * H + base] === AIR) this.setRaw(x, base, z, GRASS);
+        } else if (this.data[(z * R + x) * H + base] === AIR) this.setRaw(x, base, z, ground);
       }
     };
 
     // ---- cottages ----
-    for (let i = 0; i < 26; i++) {
+    for (let i = 0; i < counts[0]; i++) {
       const s = tryPlace(7, 18);
       if (!s) break;
       const { x0, z0, base } = s;
@@ -282,14 +412,14 @@ export class World {
       const [ddx, ddz, dx0, dz0] = [[0, -1, x0 + 3, z0 - 1], [0, 1, x0 + 3, z0 + S], [-1, 0, x0 - 1, z0 + 3], [1, 0, x0 + S, z0 + 3]][doorSide];
       for (let k = 0; k < 4; k++) {
         const px = dx0 + ddx * k, pz = dz0 + ddz * k;
-        if (px < 0 || pz < 0 || px >= W || pz >= D) break;
-        const h = heights[pz * W + px];
-        if (this.data[(pz * W + px) * H + h] === GRASS) this.setRaw(px, h, pz, GRAVEL);
+        if (px < 0 || pz < 0 || px >= R || pz >= R) break;
+        const h = heights[pz * R + px];
+        if (this.data[(pz * R + px) * H + h] === ground) this.setRaw(px, h, pz, GRAVEL);
       }
     }
 
     // ---- ruined towers ----
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0; i < counts[1]; i++) {
       const s = tryPlace(5, 40);
       if (!s) break;
       const { x0, z0, base } = s;
@@ -328,16 +458,109 @@ export class World {
     this.structures = placed.length;
   }
 
-  findSpawn() {
-    const cx = W / 2, cz = D / 2;
-    for (let r = 0; r < W / 2; r += 2) {
-      for (let k = 0; k < 24; k++) {
-        const a = (k / 24) * Math.PI * 2;
-        const x = Math.floor(cx + Math.cos(a) * r), z = Math.floor(cz + Math.sin(a) * r);
-        const y = this.tops[z * W + x];
-        if (this.get(x, y, z) === GRASS) return { x: x + 0.5, y: y + 1, z: z + 0.5 };
+  /** Flatlands, Archipelago and Desert. Only edges on the outside of the world slope down into the sea. */
+  async custom(seed, reg, onProgress) {
+    const d = this.data;
+    const kind = reg.kind;
+    const n1 = makeNoise2D(seed), n2 = makeNoise2D(seed + 11), n4 = makeNoise2D(seed + 37), n5 = makeNoise2D(seed + 41);
+    const c1 = makeNoise3D(seed + 51), c2 = makeNoise3D(seed + 67);
+    const rnd = mulberry32(seed ^ 0x9e3779b9);
+    const heights = new Int16Array(R * R);
+    const west = reg.ox === 0, east = reg.ox + R === W, north = reg.oz === 0, south = reg.oz + R === D;
+    const base = WATER_LEVEL + 4;
+
+    for (let z = 0; z < R; z++) {
+      for (let x = 0; x < R; x++) {
+        const e = Math.min(west ? x : 1e9, east ? R - 1 - x : 1e9, north ? z : 1e9, south ? R - 1 - z : 1e9);
+        const t = Math.min(1, e / 64);
+        const edge = t * t * (3 - 2 * t);
+        let h;
+        if (kind === 'flat') h = base;
+        else if (kind === 'desert') {
+          // rolling dunes, flattening out toward the Flatlands in the north
+          const blend = Math.min(1, z / 40);
+          h = base + (fbm2(n1, x / 45, z / 45, 3) * 6 + Math.abs(fbm2(n2, x / 18, z / 18, 2)) * 3) * blend;
+        } else {
+          // islands: scattered bumps of noise, plus one big island in the middle for the bridges to land on
+          const centre = Math.max(0, 1 - Math.hypot(x - R / 2, z - R / 2) / 110);
+          const v = fbm2(n1, x / 60, z / 60, 4) + fbm2(n2, x / 22, z / 22, 2) * 0.25 + centre * 0.9;
+          h = WATER_LEVEL - 9 + Math.max(0, v + 0.15) * 34;
+        }
+        const seabed = WATER_LEVEL - 14;
+        h = seabed + (h - seabed) * edge;
+        h = Math.max(4, Math.min(H - 16, Math.floor(h)));
+        heights[z * R + x] = h;
+
+        const col = (z * R + x) * H;
+        const beach = h <= WATER_LEVEL + 1;
+        const deep = h < WATER_LEVEL - 5;
+        const sandy = kind === 'desert' || beach;
+        const top = deep ? GRAVEL : sandy ? SAND : GRASS;
+        const sub = deep ? GRAVEL : sandy ? SAND : DIRT;
+        const subDepth = kind === 'desert' ? 5 : 3 + Math.floor((n4(x / 7 + 50, z / 7) + 1) * 1.5);
+        const maxY = Math.max(h, WATER_LEVEL);
+        for (let y = 0; y <= maxY; y++) {
+          let b;
+          if (y === 0 || (y < 3 && rnd() < 0.5)) b = BEDROCK;
+          else if (y < h - subDepth) b = STONE;
+          else if (y < h) b = sub;
+          else if (y === h) b = top;
+          else b = WATER;
+          d[col + y] = b;
+        }
+        // caves stay underground on the flatlands, so the surface stays flat
+        const caveTop = kind === 'flat' ? h - 6 : beach ? h - 7 : h;
+        for (let y = 4; y <= caveTop; y++) {
+          const a = c1(x / 34, y / 20, z / 34);
+          const b = c2(x / 34, y / 20, z / 34);
+          if (a * a + b * b < 0.0055) d[col + y] = AIR;
+        }
+      }
+      if ((z & 15) === 15) {
+        onProgress?.((z / R) * 0.85, 'Shaping the land…');
+        await yieldFrame();
       }
     }
-    return { x: cx + 0.5, y: H - 4, z: cz + 0.5 };
+
+    onProgress?.(0.86, 'Burying ores…');
+    await yieldFrame();
+    this.ores(rnd, 14000, () => (rnd() < 0.35 ? IRON_ORE : COAL_ORE), 55);
+    const rare = mulberry32(seed ^ 0x51ed270b);
+    this.ores(rare, 2600, () => (rare() < 0.35 ? DIAMOND_ORE : GOLD_ORE), 20);
+
+    onProgress?.(0.9, 'Planting trees…');
+    await yieldFrame();
+    if (kind !== 'desert') {
+      for (let z = 3; z < R - 3; z++) for (let x = 3; x < R - 3; x++) {
+        const h = heights[z * R + x];
+        if (d[(z * R + x) * H + h] !== GRASS || d[(z * R + x) * H + h + 1] !== AIR) continue;
+        const forest = Math.max(0, fbm2(n5, x / 70, z / 70, 2));
+        const p = kind === 'flat' ? 0.001 + forest * 0.02 : 0.004 + forest * 0.05;
+        if (rnd() < p) this.placeTree(x, h, z, rnd);
+      }
+    }
+
+    onProgress?.(0.95, 'Building villages…');
+    await yieldFrame();
+    if (kind === 'flat') this.placeStructures(heights, rnd, GRASS, [40, 4]);
+    else if (kind === 'desert') this.placeStructures(heights, rnd, SAND, [6, 14]);
+    else this.placeStructures(heights, rnd, GRASS, [12, 3]);
+    this.heights = heights;
+  }
+
+  /** count veins of ore in stone below maxY; pick() chooses the ore for each vein */
+  ores(rnd, count, pick, maxY) {
+    const d = this.data;
+    for (let i = 0; i < count; i++) {
+      let x = Math.floor(rnd() * R), z = Math.floor(rnd() * R), y = 3 + Math.floor(rnd() * maxY);
+      const ore = pick();
+      const n = 2 + Math.floor(rnd() * 6);
+      for (let k = 0; k < n; k++) {
+        if (x >= 0 && z >= 0 && x < R && z < R && y > 0 && y < H && d[(z * R + x) * H + y] === STONE) d[(z * R + x) * H + y] = ore;
+        const dir = Math.floor(rnd() * 3);
+        const s = rnd() < 0.5 ? -1 : 1;
+        if (dir === 0) x += s; else if (dir === 1) y += s; else z += s;
+      }
+    }
   }
 }

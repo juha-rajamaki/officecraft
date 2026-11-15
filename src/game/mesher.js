@@ -65,6 +65,23 @@ function visible(b, n) {
   return !OPAQUE[n];
 }
 
+// two crossed vertical quads (torches), each in both windings so they show from every side
+const CROSS = [[0.15, 0.15, 0.85, 0.85], [0.15, 0.85, 0.85, 0.15]];
+function crossQuads(buf, tile, x, y, z, kind, lights) {
+  const l = lights.length ? lampLight(lights, x + 0.5, y + 0.5, z + 0.5) : 0;
+  const u0 = (tile + 0.001) / NT, u1 = (tile + 0.999) / NT;
+  for (const [ax, az, bx, bz] of CROSS) {
+    for (const flip of [false, true]) {
+      const ndx = buf.p.length / 3;
+      buf.p.push(x + ax, y, z + az, x + bx, y, z + bz, x + ax, y + 1, z + az, x + bx, y + 1, z + bz);
+      buf.uv.push(u0, 0, u1, 0, u0, 1, u1, 1);
+      for (let k = 0; k < 4; k++) { buf.d.push(1, 4, kind); buf.l.push(l); }
+      if (flip) buf.i.push(ndx, ndx + 2, ndx + 1, ndx + 1, ndx + 2, ndx + 3);
+      else buf.i.push(ndx, ndx + 1, ndx + 2, ndx + 2, ndx + 1, ndx + 3);
+    }
+  }
+}
+
 export function buildChunk(world, cx, cz) {
   const out = { o: newBuf(), c: newBuf(), w: newBuf() };
   const x0 = cx * CS, z0 = cz * CS;
@@ -83,21 +100,24 @@ export function buildChunk(world, cx, cz) {
         const buf = b === WATER ? out.w : CUTOUT[b] ? out.c : out.o;
         const waterTop = b === WATER && world.get(x, y + 1, z) !== WATER;
         const kind = b === WATER ? 2 : b === LEAVES ? 1 : def.light ? 3 : 0;
+        if (def.cross) { crossQuads(buf, def.tex[1], x, y, z, kind, lights); continue; }
+        const h = def.height ?? 1;
 
         for (let fi = 0; fi < 6; fi++) {
           const f = FACES[fi];
           const [dx, dy, dz] = f.dir;
           const n = world.get(x + dx, y + dy, z + dz);
-          if (!visible(b, n)) continue;
+          if (def.noCaps && dy) continue;
+          if (!visible(b, n) && !(h < 1 && dy === 1)) continue; // a low block's top is always open
           const tile = def.tex[dy === 1 ? 0 : dy === -1 ? 2 : 1];
           const ndx = buf.p.length / 3;
           const ao = [3, 3, 3, 3];
           for (let k = 0; k < 4; k++) {
             const c = f.corners[k];
-            let py = y + c[1];
+            let py = y + c[1] * h;
             if (waterTop && c[1] === 1) py -= 0.12;
             buf.p.push(x + c[0], py, z + c[2]);
-            buf.uv.push((tile + 0.001 + c[3] * 0.998) / NT, c[4]);
+            buf.uv.push((tile + 0.001 + c[3] * 0.998) / NT, dy ? c[4] : c[4] * h);
             if (b !== WATER) {
               // neighbours in the layer in front of the face
               q[0] = x + dx; q[1] = y + dy; q[2] = z + dz;

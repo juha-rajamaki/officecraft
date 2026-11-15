@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
 import { useStore, toast } from '../store.js';
 import { itemName } from '../game/blocks.js';
+import { itemIcon } from '../game/textures.js';
 import { Slot } from './Slot.jsx';
 import { Inventory } from './Inventory.jsx';
+import { MapView } from './MapView.jsx';
 import { Controls } from './Controls.jsx';
 import { Sensitivity, PostFxToggle, Volume, MonstersToggle } from './Sensitivity.jsx';
 
@@ -59,6 +61,37 @@ function Hearts() {
   );
 }
 
+// 8x8 pixel drumstick: [x, y, colour]
+const MEAT = [[4, 0], [5, 0], [3, 1], [4, 1], [5, 1], [6, 1], [2, 2], [3, 2], [4, 2], [5, 2], [6, 2], [2, 3], [3, 3], [4, 3], [5, 3], [6, 3],
+  [3, 4], [4, 4], [5, 4]];
+const BONE = [[2, 5], [1, 6], [2, 6], [0, 7], [1, 7]];
+
+function Drumstick({ fill }) {
+  // fill: 0 empty, 1 half, 2 full (the right half empties first, like the hearts)
+  return (
+    <svg className="heart" viewBox="-0.5 -0.5 8 8.5" shapeRendering="crispEdges">
+      {MEAT.map(([x, y]) => {
+        const on = fill === 2 || (fill === 1 && x < 4);
+        return <rect key={`m${x},${y}`} x={x} y={y} width="1.02" height="1.02" fill={on ? (x === 3 && y === 1 ? '#f0b080' : '#b8642c') : '#3a2416'} />;
+      })}
+      {BONE.map(([x, y]) => <rect key={`b${x},${y}`} x={x} y={y} width="1.02" height="1.02" fill={fill ? '#f2ead8' : '#4a4038'} />)}
+    </svg>
+  );
+}
+
+function Hunger() {
+  const food = useStore((s) => s.hunger);
+  const armor = useStore((s) => s.armor);
+  return (
+    <div className={`hunger${food <= 4 ? ' low' : ''}`}>
+      {armor && <img className="armor-icon" src={itemIcon(armor.id)} alt="" title={itemName(armor.id)} />}
+      {Array.from({ length: 10 }, (_, i) => (
+        <Drumstick key={i} fill={Math.max(0, Math.min(2, food - (9 - i) * 2))} />
+      ))}
+    </div>
+  );
+}
+
 function DamageFlash() {
   const hurtId = useStore((s) => s.hurtId);
   if (!hurtId) return null;
@@ -70,7 +103,7 @@ function Death({ game }) {
     <div className="screen death">
       <div className="death-box">
         <h1>You died!</h1>
-        <p>Watch out for the Gloom at night…</p>
+        <p>Watch out for the Gloom at night, and keep your belly full…</p>
         <button className="btn" onClick={() => game.current.respawn()}>Respawn</button>
       </div>
     </div>
@@ -121,6 +154,7 @@ export function Hud({ game }) {
   const open = useStore((s) => s.inventoryOpen);
   const underwater = useStore((s) => s.underwater);
   const dead = useStore((s) => s.dead);
+  const mapOpen = useStore((s) => s.mapOpen);
   return (
     <>
       {underwater && <div className="underwater" />}
@@ -130,10 +164,12 @@ export function Hud({ game }) {
       <Toast />
       <HeldName />
       <Hearts />
+      <Hunger />
       <Hotbar />
       {open && <Inventory game={game} />}
       {dead && <Death game={game} />}
-      {!locked && !open && !dead && <Pause game={game} />}
+      {mapOpen && <MapView game={game} />}
+      {!locked && !open && !dead && !mapOpen && <Pause game={game} />}
     </>
   );
 }

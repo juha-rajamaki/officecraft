@@ -25,12 +25,16 @@ export const store = createStore({
   selected: 0,
   cursor: null,          // stack held by the mouse in the inventory
   inventoryOpen: false,
+  mapOpen: false,        // the M map
   locked: false,         // pointer lock active
   toast: null,           // { text, id }
   debug: null,
   underwater: false,
   flying: false,
   health: 20,            // half-hearts (20 = 10 hearts)
+  hunger: 20,            // half-drumsticks (20 = full)
+  armor: null,           // worn armor stack ({ id, count: 1 }) or null
+  chest: null,           // the open chest: { key: voxel index, slots: [27] } or null
   hurtId: 0,             // increments on every hit (drives the red flash)
   dead: false,
   sensitivity: loadSensitivity(), // 0.2 – 3, multiplier on mouse look

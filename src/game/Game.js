@@ -1,12 +1,15 @@
 // The engine: rendering, chunk streaming, input, mining/placing, day/night.
 import * as THREE from 'three';
-import { World, W, D, H, CS, WATER_LEVEL } from './world.js';
+import { World, W, D, H, CS, WATER_LEVEL, REGIONS, regionAt } from './world.js';
 import { buildChunk, LIGHT_RADIUS } from './mesher.js';
 import { Player, EYE, PW, PH } from './player.js';
 import {
-  makeAtlasTexture, makeCrackTextures, makeSunTexture, makeMoonTexture, makeCloudTexture,
+  makeAtlasTexture, makeCrackTextures, makeSunTexture, makeMoonTexture, makeCloudTexture, blockColors,
 } from './textures.js';
-import { AIR, WATER, BLOCKS, ITEMS, isBlock, isSword, isPickaxe } from './blocks.js';
+import {
+  AIR, WATER, BLOCKS, ITEMS, SOLID, LEAVES, CHEST, BED, APPLE, DOOR, DOOR_B, DOOR_T, DOOR_B_OPEN, DOOR_T_OPEN,
+  isBlock, isSword, isTool, isFood, isArmor,
+} from './blocks.js';
 import { hashString } from './noise.js';
 import { store, toast } from '../store.js';
 import * as inv from './inventory.js';
@@ -27,6 +30,10 @@ const DAY_LEN = 600;       // seconds per full day
 const REACH = 5;
 const CX = W / CS, CZ = D / CS;
 const MAX_HP = 20;         // 10 hearts
+const MAX_FOOD = 20;       // 10 drumsticks
+const HUNGER_EVERY = 45;   // seconds of normal play per half-drumstick (sprinting burns 3x faster)
+const REGEN_MIN_FOOD = 6;  // natural healing needs at least 3 drumsticks
+const TOOL_NAME = { 2: 'an iron', 3: 'a diamond' };
 const SWORD_COOLDOWN = 0.35;
 
 // Time-of-day palette (THREE.Color hex = sRGB, converted to linear automatically)
@@ -97,6 +104,9 @@ export class Game {
     this.health = MAX_HP;
     this.sinceHurt = 0;
     this.regenTimer = 0;
+    this.hunger = MAX_FOOD;
+    this.hungerT = 0;
+    this.starveT = 0;
     this.attackCooldown = 0;
     this.dead = false;
     this.light = 1;
@@ -235,6 +245,11 @@ export class Game {
     this.onKeyDown = (e) => {
       if (store.get().screen !== 'game') return;
       this.sound.unlock();
+      if (e.code === 'KeyM' && !store.get().inventoryOpen) { this.toggleMap(); return; }
+      if (store.get().mapOpen) {
+        if (e.code === 'Escape') this.closeMap(false);
+        return;
+      }
       if (e.code === 'KeyE') { this.toggleInventory(); return; }
       if (store.get().inventoryOpen) {
         if (e.code === 'Escape') this.closeInventory(false);
@@ -259,7 +274,7 @@ export class Game {
       if (store.get().screen === 'game') this.sound.unlock();
       if (!this.locked) return;
       if (e.button === 0) { this.mouse.left = true; this.mouse.leftPressed = true; }
-      if (e.button === 2) { this.mouse.right = true; this.placeCooldown = 0; }
+      if (e.button === 2) { this.mouse.right = true; this.mouse.rightPressed = true; this.placeCooldown = 0; }
     };
     this.onMouseUp = (e) => {
       if (e.button === 0) { this.mouse.left = false; this.warned = false; }
@@ -326,6 +341,10 @@ export class Game {
     if (save) {
       store.set({ status: 'Restoring your changes…' });
       this.world.applyEdits(save.edits);
+      for (const [k, slots] of save.chests) {
+        const { x, y, z } = World.coords(k);
+        if (this.world.get(x, y, z) === CHEST) this.world.chests.set(k, slots);
+      }
     }
 
     const s = save ? save.pos : this.world.findSpawn();
@@ -334,8 +353,10 @@ export class Game {
     this.player.vel.x = this.player.vel.y = this.player.vel.z = 0;
     this.player.airMaxY = s.y;
     this.health = save ? save.health : MAX_HP;
+    this.hunger = save ? save.hunger : MAX_FOOD;
+    this.hungerT = this.starveT = 0;
     this.dead = false;
-    store.set({ health: this.health, dead: false });
+    store.set({ health: this.health, hunger: this.hunger, dead: false });
     this.player.yaw = save ? save.yaw : Math.random() * Math.PI * 2;
     this.player.pitch = save ? save.pitch : 0;
     if (save) this.time = save.time;
@@ -359,7 +380,8 @@ export class Game {
     store.set({
       slots: save ? save.slots : inv.defaultSlots(),
       selected: save ? save.selected : 0,
-      cursor: null, inventoryOpen: false, progress: 1,
+      armor: save ? save.armor : null,
+      cursor: null, inventoryOpen: false, chest: null, progress: 1,
     });
     this.mobs.populate(s.x, s.z);
     this.started = true;
@@ -384,13 +406,23 @@ export class Game {
     if (st.cursor) { const j = slots.indexOf(null); if (j >= 0) slots[j] = st.cursor; }
     const p = this.player.pos;
     return {
-      v: 1, seed: this.seed, savedAt: Date.now(),
+      v: 2, seed: this.seed, savedAt: Date.now(),
       edits: [...this.world.edits],
       slots, selected: st.selected,
       pos: { x: p.x, y: Math.max(-16, Math.min(H + 60, p.y)), z: p.z }, spawn: { ...this.spawnPoint },
       yaw: this.player.yaw % (Math.PI * 2), pitch: this.player.pitch,
       time: this.time, health: Math.max(1, Math.round(this.health)),
+      hunger: Math.round(this.hunger), armor: st.armor,
+      chests: [...this.chestsWithOpen()].filter(([, s]) => s.some(Boolean)),
     };
+  }
+
+  /** every chest's contents, including the one open right now */
+  chestsWithOpen() {
+    const m = new Map(this.world.chests);
+    const c = store.get().chest;
+    if (c) m.set(c.key, c.slots);
+    return m;
   }
 
   save() {
@@ -443,11 +475,100 @@ export class Game {
     }
   }
 
-  closeInventory(relock) {
-    inv.returnCursor();
-    store.set({ inventoryOpen: false });
+  toggleMap() {
+    if (store.get().mapOpen) this.closeMap(true);
+    else if (this.locked) {
+      this.keys.clear();
+      this.mouse.left = this.mouse.right = false;
+      store.set({ mapOpen: true });
+      this.sound.invOpen();
+      document.exitPointerLock();
+    }
+  }
+
+  closeMap(relock) {
+    store.set({ mapOpen: false });
     this.sound.invClose();
     if (relock) this.lock();
+  }
+
+  /** paint the whole world, seen from above, into a canvas (one pixel per `scale` blocks) */
+  drawMap(canvas, scale = 2) {
+    const n = W / scale;
+    canvas.width = canvas.height = n;
+    const g = canvas.getContext('2d');
+    const img = g.createImageData(n, n);
+    const cols = blockColors();
+    const w = this.world;
+    for (let mz = 0; mz < n; mz++) for (let mx = 0; mx < n; mx++) {
+      const x = mx * scale, z = mz * scale;
+      const top = w.tops[z * W + x];
+      let y = top;
+      while (y > 0 && w.data[(z * W + x) * H + y] === AIR) y--;
+      const id = w.data[(z * W + x) * H + y];
+      const c = cols[id] || [255, 0, 255];
+      let k;
+      if (id === WATER) {
+        // deeper water is darker
+        let b = y;
+        while (b > 0 && w.data[(z * W + x) * H + b] === WATER) b--;
+        k = 1.15 - Math.min(0.55, (y - b) * 0.04);
+      } else {
+        // light from the north-west: slopes facing it are brighter
+        const nz = Math.max(0, z - scale), nx = Math.max(0, x - scale);
+        k = 0.92 + Math.max(-0.3, Math.min(0.3, (y - w.tops[nz * W + nx]) * 0.08)) + (y - WATER_LEVEL) * 0.004;
+      }
+      const o = (mz * n + mx) * 4;
+      img.data[o] = c[0] * k; img.data[o + 1] = c[1] * k; img.data[o + 2] = c[2] * k; img.data[o + 3] = 255;
+    }
+    g.putImageData(img, 0, 0);
+    // borders between the maps
+    g.strokeStyle = 'rgba(255,255,255,0.35)';
+    g.setLineDash([6, 6]);
+    g.beginPath();
+    g.moveTo(n / 2, 0); g.lineTo(n / 2, n); g.moveTo(0, n / 2); g.lineTo(n, n / 2);
+    g.stroke();
+    return { size: W, player: { ...this.player.pos }, yaw: this.player.yaw, spawn: { ...this.spawnPoint } };
+  }
+
+  closeInventory(relock) {
+    this.returnCursorSafely();
+    this.storeChest();
+    store.set({ inventoryOpen: false, chest: null });
+    this.sound.invClose();
+    if (relock) this.lock();
+  }
+
+  // ---------------- chests ----------------
+  openChest(t) {
+    const key = (t.z * W + t.x) * H + t.y;
+    const slots = this.world.chests.get(key) ?? Array(inv.CHEST_SIZE).fill(null);
+    this.keys.clear();
+    this.mouse.left = this.mouse.right = false;
+    store.set({ inventoryOpen: true, chest: { key, slots: slots.slice() } });
+    this.sound.invOpen();
+    document.exitPointerLock();
+  }
+
+  /** put the stack held by the mouse back; what doesn't fit in the inventory goes into the open chest */
+  returnCursorSafely() {
+    const { cursor, chest } = store.get();
+    if (!cursor) return;
+    const left = inv.returnCursor();
+    if (left && chest) {
+      const cs = chest.slots.slice();
+      const rest = inv.moveIntoChest(cs, left);
+      store.set({ chest: { ...chest, slots: cs } });
+      if (rest) toast('Inventory full: some items were lost');
+    } else if (left) toast('Inventory full: some items were lost');
+  }
+
+  /** copy the open chest's slots back into the world */
+  storeChest() {
+    const c = store.get().chest;
+    if (!c) return;
+    const { x, y, z } = World.coords(c.key);
+    if (this.world.get(x, y, z) === CHEST) this.world.chests.set(c.key, c.slots.slice());
   }
 
   // ---------------- chunks ----------------
@@ -585,14 +706,30 @@ export class Game {
     this.sound.setListener(this.player.pos, EYE, this.player.yaw);
     this.movementSounds(dt, input, inWater);
 
+    // say so when walking onto another map
+    const reg = regionAt(this.player.pos.x, this.player.pos.z);
+    if (reg !== this.region) {
+      if (this.region) toast(`Entering ${reg.name}`);
+      this.region = reg;
+    }
+
     // fall damage: 1 HP per block beyond 3
     if (this.player.lastFall > 3.5) this.hurt(Math.floor(this.player.lastFall - 3), null);
 
-    // natural regeneration after 6 s without damage
+    // hunger: drains over time, faster while sprinting
+    const moving = Math.hypot(this.player.vel.x, this.player.vel.z) > 1;
+    this.hungerT += dt * (input.sprint && moving && !this.player.flying ? 3 : 1);
+    if (this.hungerT >= HUNGER_EVERY) { this.hungerT = 0; this.setHunger(this.hunger - 1); }
+    if (this.hunger <= 0) {
+      this.starveT += dt;
+      if (this.starveT >= 4) { this.starveT = 0; if (this.health > 1) this.hurt(1, null, true); }
+    } else this.starveT = 0;
+
+    // natural regeneration after 6 s without damage, while not too hungry (healing makes you hungrier)
     this.sinceHurt += dt;
-    if (this.sinceHurt > 6 && this.health < MAX_HP) {
+    if (this.sinceHurt > 6 && this.health < MAX_HP && this.hunger >= REGEN_MIN_FOOD) {
       this.regenTimer += dt;
-      if (this.regenTimer >= 2.5) { this.regenTimer = 0; this.setHealth(this.health + 1); }
+      if (this.regenTimer >= 2.5) { this.regenTimer = 0; this.setHealth(this.health + 1); this.hungerT += 6; }
     }
     this.attackCooldown = Math.max(0, this.attackCooldown - dt);
 
@@ -654,6 +791,7 @@ export class Game {
     } else this.outline.visible = false;
 
     this.updateMining(dt);
+    this.updateUse();
     this.updatePlacing(dt);
 
     this.time = (this.time + dt / DAY_LEN) % 1;
@@ -667,8 +805,16 @@ export class Game {
     store.set({ health: this.health });
   }
 
-  hurt(dmg, from) {
+  setHunger(v) {
+    this.hunger = Math.max(0, Math.min(MAX_FOOD, v));
+    store.set({ hunger: this.hunger });
+  }
+
+  /** pierce = ignores armor (starving) */
+  hurt(dmg, from, pierce = false) {
     if (this.dead || dmg <= 0) return;
+    const armor = store.get().armor;
+    if (armor && !pierce) dmg = Math.max(1, Math.round(dmg * (1 - ITEMS[armor.id].armor)));
     this.setHealth(this.health - dmg);
     this.sinceHurt = 0;
     this.regenTimer = 0;
@@ -689,8 +835,9 @@ export class Game {
     this.sound.death();
     this.mouse.left = this.mouse.right = false;
     this.keys.clear();
-    store.set({ dead: true, inventoryOpen: false });
-    inv.returnCursor();
+    this.returnCursorSafely();
+    this.storeChest();
+    store.set({ dead: true, inventoryOpen: false, chest: null });
     document.exitPointerLock();
   }
 
@@ -704,6 +851,8 @@ export class Game {
     this.dead = false;
     this.sinceHurt = 0;
     this.setHealth(MAX_HP);
+    this.setHunger(MAX_FOOD);
+    this.hungerT = this.starveT = 0;
     store.set({ dead: false, flying: false });
     this.sound.respawn();
     this.updateCamera();
@@ -734,24 +883,32 @@ export class Game {
     const held = st.slots[st.selected];
     const t = this.target;
     if (this.mouse.left && this.locked && t) {
-      if (isPickaxe(held?.id)) {
-        if (BLOCKS[t.id].unbreakable) {
-          this.mining = null;
-          if (!this.warned) { toast('Bedrock is unbreakable'); this.warned = true; }
-        } else {
-          const m = this.mining;
-          if (!m || m.x !== t.x || m.y !== t.y || m.z !== t.z) { this.mining = { x: t.x, y: t.y, z: t.z, t: 0 }; this.mineStage = -1; }
-          // block hardness x tool speed (iron pickaxe = half the time)
-          this.mining.need = BLOCKS[t.id].hardness * ITEMS[held.id].mineMult;
-          this.mining.t += dt;
-          // a knock on every other crack stage: 4 hits per block
-          const knock = Math.floor((this.mining.t / this.mining.need) * 4);
-          if (knock !== this.mineStage && knock < 4) { this.mineStage = knock; this.sound.mineHit(t.id); }
-          if (this.mining.t >= this.mining.need) { this.breakBlock(t); this.mining = null; }
+      const def = BLOCKS[t.id], tool = ITEMS[held?.id];
+      if (!isTool(held?.id)) {
+        this.mining = null;
+        if (!this.warned) { toast('You need a tool to mine! (pickaxe, axe or shovel)'); this.warned = true; }
+      } else if (def.unbreakable) {
+        this.mining = null;
+        if (!this.warned) { toast('Bedrock is unbreakable'); this.warned = true; }
+      } else if (def.tier && (tool.kind !== 'pick' || tool.tier < def.tier)) {
+        this.mining = null;
+        if (!this.warned) { toast(`${def.name} needs ${TOOL_NAME[def.tier]} pickaxe or better`); this.warned = true; }
+      } else {
+        const m = this.mining;
+        if (!m || m.x !== t.x || m.y !== t.y || m.z !== t.z) { this.mining = { x: t.x, y: t.y, z: t.z, t: 0 }; this.mineStage = -1; }
+        // block hardness x tool speed; the wrong kind of tool is slow
+        const right = !def.tool || def.tool === tool.kind;
+        this.mining.need = def.hardness * (right ? tool.mineMult : 2.5);
+        this.mining.t += dt;
+        // a knock on every other crack stage: 4 hits per block
+        const knock = Math.floor((this.mining.t / this.mining.need) * 4);
+        if (knock !== this.mineStage && knock < 4) { this.mineStage = knock; this.sound.mineHit(t.id); }
+        if (this.mining.t >= this.mining.need) {
+          if (t.id === CHEST && !this.roomForChest(t)) {
+            this.mining = null;
+            if (!this.warned) { toast('Inventory full: empty the chest first'); this.warned = true; }
+          } else { this.breakBlock(t); this.mining = null; }
         }
-      } else if (!this.warned) {
-        toast('You need a pickaxe to mine!');
-        this.warned = true;
       }
     } else this.mining = null;
 
@@ -766,11 +923,104 @@ export class Game {
   breakBlock(t) {
     const def = BLOCKS[t.id];
     this.world.set(t.x, t.y, t.z, AIR);
+    if (def.door) { // the other half of the door goes too
+      const oy = t.id === DOOR_B || t.id === DOOR_B_OPEN ? t.y + 1 : t.y - 1;
+      if (BLOCKS[this.world.get(t.x, oy, t.z)]?.door) this.world.set(t.x, oy, t.z, AIR);
+    }
     this.rebuildFor(t.x, t.z, t.id);
     this.sound.breakBlock(t.id);
-    const left = inv.addItem(def.drop ?? t.id, 1);
-    if (left > 0) toast('Inventory full!');
+    const drops = [[def.drop ?? t.id, 1]];
+    if (t.id === LEAVES && Math.random() < 0.1) drops.push([APPLE, 1]);
+    if (t.id === CHEST) {
+      const key = (t.z * W + t.x) * H + t.y;
+      for (const s of this.world.chests.get(key) ?? []) if (s) drops.push([s.id, s.count]);
+      this.world.chests.delete(key);
+    }
+    let lost = 0;
+    for (const [id, n] of drops) lost += inv.addItem(id, n);
+    if (lost > 0) toast('Inventory full!');
     else this.sound.pickup();
+  }
+
+  /** would everything in this chest (and the chest itself) fit in the inventory? */
+  roomForChest(t) {
+    const items = [[CHEST, 1], ...(this.world.chests.get((t.z * W + t.x) * H + t.y) ?? []).filter(Boolean).map((s) => [s.id, s.count])];
+    const slots = store.get().slots.map((s) => (s ? { ...s } : null));
+    for (const [id, n] of items) {
+      let left = n;
+      const max = ITEMS[id]?.maxStack ?? 64;
+      for (const s of slots) if (left && s && s.id === id && !s.inf && s.count < max) { const a = Math.min(left, max - s.count); s.count += a; left -= a; }
+      for (let i = 0; i < slots.length && left; i++) if (!slots[i]) { const a = Math.min(left, max); slots[i] = { id, count: a, inf: false }; left -= a; }
+      if (left) return false;
+    }
+    return true;
+  }
+
+  /** right click on a chest, door or bed, or with food or armor in hand (once per click) */
+  updateUse() {
+    const pressed = this.mouse.rightPressed;
+    this.mouse.rightPressed = false;
+    if (!pressed || !this.locked) return;
+    const t = this.target;
+    const st = store.get();
+    const held = st.slots[st.selected];
+    if (t && t.id === CHEST) { this.openChest(t); this.mouse.right = false; return; }
+    if (t && BLOCKS[t.id].door) { this.toggleDoor(t); this.mouse.right = false; return; }
+    if (t && t.id === BED) { this.sleep(t); this.mouse.right = false; return; }
+    if (held && isFood(held.id)) { this.eat(held.id); this.mouse.right = false; return; }
+    if (held && isArmor(held.id)) {
+      const old = st.armor;
+      const slots = st.slots.slice();
+      slots[st.selected] = old;
+      store.set({ slots, armor: held });
+      this.sound.craft();
+      toast(`Wearing ${ITEMS[held.id].name}`);
+      this.mouse.right = false;
+    }
+  }
+
+  eat(id) {
+    const f = ITEMS[id];
+    if (this.hunger >= MAX_FOOD && (!f.heal || this.health >= MAX_HP)) { toast("You're not hungry"); return; }
+    inv.consumeSelected();
+    this.setHunger(this.hunger + f.food);
+    if (f.heal) this.setHealth(this.health + f.heal);
+    this.sound.eat();
+    this.hand.swing = 1;
+  }
+
+  toggleDoor(t) {
+    const bottom = t.id === DOOR_B || t.id === DOOR_B_OPEN;
+    const by = bottom ? t.y : t.y - 1;
+    if (!BLOCKS[this.world.get(t.x, by, t.z)]?.door) return; // a lone top half: nothing to swing
+    const open = t.id === DOOR_B_OPEN || t.id === DOOR_T_OPEN;
+    if (open && this.playerOverlaps(t.x, by, t.z, 2)) return; // don't shut the door on yourself
+    this.world.set(t.x, by, t.z, open ? DOOR_B : DOOR_B_OPEN);
+    if (BLOCKS[this.world.get(t.x, by + 1, t.z)]?.door) this.world.set(t.x, by + 1, t.z, open ? DOOR_T : DOOR_T_OPEN);
+    this.rebuildAround(t.x, t.z);
+    this.sound.door(open);
+    this.hand.swing = 1;
+  }
+
+  sleep(t) {
+    this.spawnPoint = { x: t.x + 0.5, y: t.y + 0.6, z: t.z + 0.5 };
+    if (this.dayAmt > 0.35) { toast('Respawn point set. You can only sleep at night.'); return; }
+    const p = this.player.pos;
+    if (this.enemies.list.some((e) => !e.dying && Math.hypot(e.body.pos.x - p.x, e.body.pos.z - p.z) < 10)) {
+      toast("Respawn point set. You can't sleep with a Gloom nearby!");
+      return;
+    }
+    this.time = 0.02; // sunrise
+    this.enemies.clear();
+    this.updateSky();
+    this.save();
+    toast('Good morning! Respawn point set.');
+  }
+
+  /** does the player's box overlap blocks (x, y..y+h-1, z)? */
+  playerOverlaps(x, y, z, h = 1) {
+    const p = this.player.pos;
+    return p.x - PW < x + 1 && p.x + PW > x && p.y < y + h && p.y + PH > y && p.z - PW < z + 1 && p.z + PW > z;
   }
 
   updatePlacing(dt) {
@@ -782,16 +1032,26 @@ export class Game {
     const st = store.get();
     const held = st.slots[st.selected];
     const t = this.target;
-    if (!held || !isBlock(held.id) || !t) return;
+    if (!held || !t || (!isBlock(held.id) && held.id !== DOOR)) return;
+    if (t.id === CHEST || t.id === BED || BLOCKS[t.id].door) return; // those are used, not built on
     const x = t.x + t.nx, y = t.y + t.ny, z = t.z + t.nz;
-    if (x < 0 || z < 0 || x >= W || z >= D || y < 1 || y >= H) return;
-    const cur = this.world.get(x, y, z);
-    if (cur !== AIR && cur !== WATER) return;
-    const p = this.player.pos;
-    const overlaps = p.x - PW < x + 1 && p.x + PW > x && p.y < y + 1 && p.y + PH > y && p.z - PW < z + 1 && p.z + PW > z;
-    if (overlaps) return;
-    this.world.set(x, y, z, held.id);
-    this.rebuildFor(x, z, held.id);
+    const free = (yy) => {
+      if (x < 0 || z < 0 || x >= W || z >= D || yy < 1 || yy >= H) return false;
+      const cur = this.world.get(x, yy, z);
+      return cur === AIR || cur === WATER;
+    };
+    if (!free(y)) return;
+    if (held.id === DOOR) {
+      // a door is two blocks tall and stands on something solid
+      if (!free(y + 1) || !SOLID[this.world.get(x, y - 1, z)] || this.playerOverlaps(x, y, z, 2)) return;
+      this.world.set(x, y, z, DOOR_B);
+      this.world.set(x, y + 1, z, DOOR_T);
+      this.rebuildAround(x, z);
+    } else {
+      if (SOLID[held.id] && this.playerOverlaps(x, y, z)) return;
+      this.world.set(x, y, z, held.id);
+      this.rebuildFor(x, z, held.id);
+    }
     inv.consumeSelected();
     this.sound.place(held.id);
     this.hand.swing = 1;

@@ -153,7 +153,7 @@ export class Hand {
 
     for (const m of [this.blockMat, this.cutoutMat, this.colorMat, this.armMat]) {
       if (m === this.armMat) m.color.setHex(0xd9a27a).multiplyScalar(light);
-      else m.color.setScalar(m === this.blockMat && this.selfLit ? 1.6 : light);
+      else m.color.setScalar((m === this.blockMat || m === this.cutoutMat) && this.selfLit ? 1.6 : light);
     }
   }
 }

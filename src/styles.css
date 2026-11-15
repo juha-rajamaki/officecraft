@@ -117,6 +117,12 @@ kbd {
   position: fixed; bottom: 74px; left: 50%; transform: translateX(-246px);
   display: flex; gap: 2px; pointer-events: none;
 }
+.hunger {
+  position: fixed; bottom: 74px; right: calc(50% - 246px);
+  display: flex; gap: 2px; align-items: center; pointer-events: none;
+}
+.hunger.low .heart { animation: lowpulse .6s infinite; }
+.armor-icon { width: 24px; height: 24px; image-rendering: pixelated; margin-right: 4px; }
 .heart { width: 22px; height: 22px; image-rendering: pixelated; filter: drop-shadow(1px 1px 0 rgba(0,0,0,.5)); }
 .hearts.shake { animation: shake .35s; }
 .hearts.low .heart { animation: lowpulse .6s infinite; }
@@ -157,7 +163,10 @@ kbd {
 
 /* ---------- crafting ---------- */
 .inv-body { display: flex; gap: 18px; align-items: flex-start; }
-.crafting { display: flex; flex-direction: column; gap: 6px; min-width: 230px; }
+.crafting { display: flex; flex-direction: column; gap: 6px; min-width: 230px; max-height: 70vh; overflow-y: auto; padding-right: 6px; }
+.chest-grid { margin-bottom: 12px; padding-bottom: 12px; border-bottom: 1px solid rgba(255,255,255,.15); }
+.armor-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.armor-row .hint { font-size: 11px; color: var(--muted); }
 .crafting h3 { margin: 0 0 4px; font-size: 14px; font-weight: 400; }
 .crafting .hint { font-size: 10px; color: var(--muted); margin: 4px 0 0; }
 .recipe { display: flex; align-items: center; gap: 6px; }
@@ -179,3 +188,23 @@ kbd {
 .btn.secondary { background: rgba(255,255,255,.12); }
 .btn.secondary:hover { background: rgba(255,255,255,.2); }
 .continue-seed { font-size: 11px; color: var(--muted); margin: 6px 0 12px; }
+
+/* ---------- map ---------- */
+.map-bg { background: rgba(0,0,0,.55); }
+.map-panel { padding: 16px; }
+.map-wrap { position: relative; width: min(78vh, 86vw); aspect-ratio: 1; }
+.map-canvas { width: 100%; height: 100%; image-rendering: pixelated; border-radius: 3px; display: block; }
+.map-label {
+  position: absolute; transform: translateX(-50%); font-size: 13px; color: #fff; white-space: nowrap;
+  text-shadow: 2px 2px 0 rgba(0,0,0,.7); pointer-events: none; opacity: .85;
+}
+.map-label.here { color: #ffe27a; opacity: 1; }
+.map-player {
+  position: absolute; width: 0; height: 0; pointer-events: none;
+  border-left: 7px solid transparent; border-right: 7px solid transparent; border-bottom: 16px solid #ff3b3b;
+  filter: drop-shadow(0 0 2px #000);
+}
+.map-spawn {
+  position: absolute; width: 8px; height: 8px; transform: translate(-50%, -50%); pointer-events: none;
+  background: #fff; border: 2px solid #c0282f; border-radius: 50%;
+}

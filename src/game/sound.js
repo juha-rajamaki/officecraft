@@ -2,14 +2,16 @@
 // Browsers only allow audio after a user gesture, so call unlock() from a click/keypress.
 import {
   GRASS, DIRT, STONE, COBBLE, SAND, LOG, LEAVES, PLANKS, GLASS, BRICK, SNOW, BEDROCK,
-  COAL_ORE, IRON_ORE, GRAVEL, LAMP,
+  COAL_ORE, IRON_ORE, GRAVEL, LAMP, TORCH, CHEST, GOLD_ORE, DIAMOND_ORE, BED, DOOR_B, DOOR_T,
+  DOOR_B_OPEN, DOOR_T_OPEN, LADDER, DOOR,
 } from './blocks.js';
 
 // block id -> material family
 const MAT = [];
 for (const id of [GRASS, DIRT, LEAVES]) MAT[id] = 'grass';
-for (const id of [STONE, COBBLE, BRICK, BEDROCK, COAL_ORE, IRON_ORE]) MAT[id] = 'stone';
-for (const id of [LOG, PLANKS]) MAT[id] = 'wood';
+for (const id of [STONE, COBBLE, BRICK, BEDROCK, COAL_ORE, IRON_ORE, GOLD_ORE, DIAMOND_ORE]) MAT[id] = 'stone';
+for (const id of [LOG, PLANKS, TORCH, CHEST, DOOR_B, DOOR_T, DOOR_B_OPEN, DOOR_T_OPEN, LADDER, DOOR]) MAT[id] = 'wood';
+MAT[BED] = 'grass';
 MAT[SAND] = 'sand';
 MAT[GRAVEL] = 'gravel';
 MAT[SNOW] = 'snow';
@@ -245,6 +247,15 @@ export class Sound {
   }
 
   place(id) { this.hit(id, { gain: 0.7, dur: 1.3, pitch: 0.9 }); }
+
+  eat() {
+    for (let i = 0; i < 3; i++) this.noise({ f: 1100 + Math.random() * 500, q: 1.1, dur: 0.07, gain: 0.35, at: i * 0.11 });
+  }
+
+  door(closing) {
+    this.hit(LOG, { gain: 0.8, dur: 1.4, pitch: closing ? 0.7 : 0.95 });
+    this.tone({ type: 'triangle', f0: closing ? 260 : 330, f1: closing ? 160 : 420, dur: 0.12, gain: 0.08 });
+  }
 
   pickup() {
     this.tone({ type: 'sine', f0: 700, f1: 1300, dur: 0.08, gain: 0.12, at: 0.06 });

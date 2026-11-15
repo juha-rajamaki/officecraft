@@ -1,7 +1,11 @@
 // Procedural 16x16 pixel-art textures drawn into one atlas strip, plus item icons.
 import * as THREE from 'three';
 import { mulberry32 } from './noise.js';
-import { BLOCKS, ITEMS, PICKAXE, SWORD, IRON_PICKAXE, IRON_SWORD, COAL, IRON, NT } from './blocks.js';
+import {
+  BLOCKS, ITEMS, NT, PICKAXE, SWORD, IRON_PICKAXE, IRON_SWORD, COAL, IRON, AXE, SHOVEL, IRON_AXE, IRON_SHOVEL,
+  DIAMOND_PICKAXE, DIAMOND_SWORD, DIAMOND_AXE, DIAMOND_SHOVEL, GOLD, DIAMOND, APPLE, GOLDEN_APPLE, DOOR,
+  IRON_ARMOR, GOLD_ARMOR, DIAMOND_ARMOR,
+} from './blocks.js';
 
 // Sword pixel art (16x16, blade pointing up). Shared by the icon and the 3D hand model.
 export function swordPixels() {
@@ -30,12 +34,90 @@ export function pickaxePixels() {
   return [...px.values()];
 }
 
-// iron tools: the same shapes with a blue-steel palette
+// Axe pixel art: handle with a broad blade on the upper left
+export function axePixels() {
+  const px = new Map();
+  const put = (x, y, c) => px.set(`${x},${y}`, [x, y, c]);
+  for (let y = 2; y < 16; y++) { put(8, y, '#8a5a2b'); put(9, y, '#5e3b19'); }
+  for (let y = 1; y <= 7; y++) {
+    const w = y === 1 || y === 7 ? 2 : y === 2 || y === 6 ? 3 : 4;
+    for (let x = 8 - w; x < 8; x++) put(x, y, x === 8 - w ? '#9aa6ab' : '#e3ecef');
+  }
+  return [...px.values()];
+}
+
+// Shovel pixel art: handle with a rounded spade at the top
+export function shovelPixels() {
+  const px = [];
+  for (let y = 6; y < 16; y++) px.push([7, y, '#8a5a2b'], [8, y, '#5e3b19']);
+  for (let y = 0; y <= 5; y++) for (let x = 5; x <= 10; x++) {
+    if ((y === 0 || y === 5) && (x === 5 || x === 10)) continue;
+    px.push([x, y, x === 5 || y === 5 ? '#9aa6ab' : '#e3ecef']);
+  }
+  return px;
+}
+
+// iron / diamond tools: the same shapes with another palette
 const IRON_PAL = {
   '#e3ecef': '#d4e4ff', '#9aa6ab': '#5f78a8', '#e9f1f4': '#ffffff', '#b9c6cc': '#8ea6d6',
   '#9fb0b8': '#6c84b4', '#eef5f7': '#e2eeff', '#c9d6dc': '#a6bfea', '#8796a0': '#4d6290',
 };
-const recolor = (px) => px.map(([x, y, c]) => [x, y, IRON_PAL[c] ?? c]);
+const DIAMOND_PAL = {
+  '#e3ecef': '#8ff5ea', '#9aa6ab': '#1f9c94', '#e9f1f4': '#e6fffc', '#b9c6cc': '#4fd6cb',
+  '#9fb0b8': '#2bb3a8', '#eef5f7': '#b8fff6', '#c9d6dc': '#6fe8dc', '#8796a0': '#177a73',
+};
+const recolor = (px, pal = IRON_PAL) => px.map(([x, y, c]) => [x, y, pal[c] ?? c]);
+
+function ingotPixels(light, mid, dark) {
+  const px = [];
+  for (let y = 6; y <= 10; y++) for (let x = 2 + (10 - y); x <= 13 - (y - 6); x++) {
+    px.push([x, y, y === 6 ? light : y === 10 || x === 13 - (y - 6) ? dark : mid]);
+  }
+  return px;
+}
+
+function gemPixels() {
+  const px = [];
+  const rows = [[6, 9], [4, 11], [3, 12], [4, 11], [5, 10], [6, 9], [7, 8]];
+  rows.forEach(([a, b], i) => {
+    for (let x = a; x <= b; x++) px.push([x, i + 4, i === 0 ? '#e6fffc' : x < 7 && i < 3 ? '#b8fff6' : i > 3 ? '#1f9c94' : '#4fd6cb']);
+  });
+  return px;
+}
+
+function applePixels(gold) {
+  const body = gold ? ['#ffd94a', '#c99a14', '#fff3b0'] : ['#d8262c', '#8f1418', '#ff9a9a'];
+  const px = [];
+  for (let y = 4; y < 15; y++) for (let x = 2; x < 14; x++) {
+    const d = Math.hypot((x - 7.5) * 1.05, (y - 9.3) * 1.1);
+    if (d > 5.4 || (y === 4 && x > 5 && x < 10)) continue;
+    px.push([x, y, x === 5 && y === 7 ? body[2] : d > 4.3 || y > 12 ? body[1] : body[0]]);
+  }
+  px.push([8, 2, '#6b4423'], [8, 3, '#6b4423'], [9, 2, '#4f9a32'], [10, 2, '#4f9a32'], [10, 1, '#3c7a24']);
+  return px;
+}
+
+function doorPixels() {
+  const px = [];
+  for (let y = 0; y < 16; y++) for (let x = 4; x < 12; x++) {
+    const frame = x === 4 || x === 11 || y === 0 || y === 15 || y === 7;
+    const pane = !frame && y > 1 && y < 6 && x > 5 && x < 10;
+    px.push([x, y, pane ? '#bfe3f2' : frame ? '#7a5a34' : '#a87e4c']);
+  }
+  px.push([10, 9, '#3a3a3a']);
+  return px;
+}
+
+function armorPixels(light, mid, dark) {
+  const px = [];
+  for (let y = 2; y < 15; y++) for (let x = 2; x < 14; x++) {
+    const neck = y < 5 && x > 4 && x < 11;
+    const sleeve = y > 6 && (x < 4 || x > 11);
+    if (neck || sleeve) continue;
+    px.push([x, y, x < 4 || x > 11 || y === 14 ? dark : (x + y) % 5 === 0 ? light : mid]);
+  }
+  return px;
+}
 
 // a rough round lump: coal (dark, glinting) or iron (rusty-beige nugget)
 function lumpPixels(base, dark, glint, seed) {
@@ -49,13 +131,29 @@ function lumpPixels(base, dark, glint, seed) {
   return px;
 }
 
-/** 16x16 pixel art for every non-block item (tools, coal, iron) */
+/** 16x16 pixel art for every non-block item (tools, materials, food, armor) */
 export function itemPixels(id) {
   switch (id) {
     case PICKAXE: return pickaxePixels();
     case SWORD: return swordPixels();
     case IRON_PICKAXE: return recolor(pickaxePixels());
     case IRON_SWORD: return recolor(swordPixels());
+    case DIAMOND_PICKAXE: return recolor(pickaxePixels(), DIAMOND_PAL);
+    case DIAMOND_SWORD: return recolor(swordPixels(), DIAMOND_PAL);
+    case AXE: return axePixels();
+    case IRON_AXE: return recolor(axePixels());
+    case DIAMOND_AXE: return recolor(axePixels(), DIAMOND_PAL);
+    case SHOVEL: return shovelPixels();
+    case IRON_SHOVEL: return recolor(shovelPixels());
+    case DIAMOND_SHOVEL: return recolor(shovelPixels(), DIAMOND_PAL);
+    case GOLD: return ingotPixels('#fff3b0', '#f2c230', '#b08410');
+    case DIAMOND: return gemPixels();
+    case APPLE: return applePixels(false);
+    case GOLDEN_APPLE: return applePixels(true);
+    case DOOR: return doorPixels();
+    case IRON_ARMOR: return armorPixels('#ffffff', '#c9d3dc', '#7f8b96');
+    case GOLD_ARMOR: return armorPixels('#fff3b0', '#f2c230', '#b08410');
+    case DIAMOND_ARMOR: return armorPixels('#e6fffc', '#4fd6cb', '#1f9c94');
     case COAL: return lumpPixels('#45454d', '#26262b', '#a9a9bb', 7);
     case IRON: return lumpPixels('#d8b48e', '#9a7356', '#f3e2cf', 11);
     default: return [];
@@ -149,8 +247,68 @@ paint(19, (x, y) => {                                                   // lamp:
   return vary([255, 214 - d * 6, 120 - d * 8], 0.08);
 });
 
+const CLEAR = [0, 0, 0, 0];
+const WOOD = [170, 134, 84], WOOD_D = [110, 84, 50];
+paint(20, (x, y) => {                                                   // torch
+  if (y >= 3 && y <= 5 && x >= 6 && x <= 9) return y === 3 ? [255, 236, 150] : [255, 170, 40];
+  if (y >= 6 && x >= 7 && x <= 8) return x === 7 ? [150, 110, 60] : [104, 76, 40];
+  return CLEAR;
+});
+paint(21, (x, y) => {                                                   // chest side
+  if (x === 0 || x === 15 || y === 0 || y === 15 || y === 5) return WOOD_D;
+  if ((x === 7 || x === 8) && y >= 4 && y <= 7) return [200, 200, 205];
+  return vary(y < 5 ? [150, 108, 60] : [162, 118, 66], 0.1);
+});
+paint(22, (x, y) => (x === 0 || x === 15 || y === 0 || y === 15 ? WOOD_D : vary([150, 108, 60], 0.1))); // chest top
+{ const m = spots(4, 1.5); paint(23, (x, y) => (m[y * 16 + x] ? vary([250, 210, 60], 0.15) : vary(STONE_C, 0.22))); } // gold ore
+{ const m = spots(3, 1.4); paint(24, (x, y) => (m[y * 16 + x] ? vary([90, 230, 220], 0.15) : vary(STONE_C, 0.22))); } // diamond ore
+paint(25, (x, y) => {                                                   // bed top: pillow + red blanket
+  if (y < 5) return x === 0 || x === 15 || y === 0 ? [215, 215, 220] : vary([245, 245, 248], 0.03);
+  return x === 0 || x === 15 || y === 15 ? [130, 20, 25] : vary([190, 32, 40], 0.08);
+});
+paint(26, (x, y) => {                                                   // bed side (only the low part shows)
+  if (y < 7) return CLEAR;
+  if (y < 11) return vary([190, 32, 40], 0.08);
+  if (y >= 13 && (x < 2 || x > 13)) return WOOD_D;
+  return y < 13 ? vary(WOOD, 0.1) : CLEAR;
+});
+const doorTile = (t, top) => paint(t, (x, y) => {                       // door halves
+  const frame = x < 2 || x > 13 || (top ? y < 2 : y > 13);
+  if (frame) return WOOD_D;
+  if (top && y > 3 && y < 12 && x > 3 && x < 12) return (x === 7 || x === 8 || y === 7 || y === 8) ? WOOD_D : CLEAR;
+  if (!top && x === 11 && y === 2) return [60, 60, 60];
+  return vary(y % 4 === 1 ? [150, 114, 70] : WOOD, 0.08);
+});
+doorTile(27, false);
+doorTile(28, true);
+paint(29, (x) => (x < 2 ? WOOD_D : x < 3 ? WOOD : CLEAR));             // open door: just the edge
+paint(30, (x, y) => {                                                   // ladder
+  if (x === 2 || x === 3 || x === 12 || x === 13) return vary(WOOD_D, 0.1);
+  if (x > 3 && x < 12 && y % 4 === 2) return vary(WOOD, 0.1);
+  return CLEAR;
+});
+
 actx.putImageData(img, 0, 0);
 export const atlasCanvas = atlas;
+
+/** average [r, g, b] of every block's top texture, for the map */
+let colorCache = null;
+export function blockColors() {
+  if (colorCache) return colorCache;
+  colorCache = [];
+  for (const b of BLOCKS) {
+    if (!b) continue;
+    const t = b.tex[0];
+    let r = 0, g = 0, bl = 0, n = 0;
+    for (let y = 0; y < TS; y++) for (let x = 0; x < TS; x++) {
+      const i = (y * TS * NT + t * TS + x) * 4;
+      if (img.data[i + 3] < 128) continue;
+      r += img.data[i]; g += img.data[i + 1]; bl += img.data[i + 2]; n++;
+    }
+    colorCache[b.id] = n ? [r / n, g / n, bl / n] : [128, 128, 128];
+  }
+  return colorCache;
+}
 
 function nearest(tex) {
   tex.magFilter = THREE.NearestFilter;
@@ -269,6 +427,8 @@ export function itemIcon(id) {
   g.imageSmoothingEnabled = false;
   const item = ITEMS[id];
   if (item) drawPixels(g, itemPixels(id), item.tool ? 2.55 : 2.7, !!item.tool);
-  else if (BLOCKS[id]) drawCube(g, BLOCKS[id].tex);
+  else if (BLOCKS[id]?.flatIcon) {
+    g.drawImage(atlas, BLOCKS[id].tex[1] * TS, 0, TS, TS, 4, 4, 40, 40);
+  } else if (BLOCKS[id]) drawCube(g, BLOCKS[id].tex);
   return (iconCache[id] = c.toDataURL());
 }

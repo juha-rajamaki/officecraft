@@ -1,5 +1,5 @@
 // First-person player: AABB physics against the voxel grid, axis-by-axis.
-import { WATER } from './blocks.js';
+import { WATER, HEIGHT, CLIMB } from './blocks.js';
 
 export const PW = 0.3;   // half width
 export const PH = 1.8;   // height
@@ -26,8 +26,36 @@ export class Player {
     for (let y = y0; y <= y1; y++)
       for (let z = z0; z <= z1; z++)
         for (let x = x0; x <= x1; x++)
-          if (world.isSolid(x, y, z)) return true;
+          if (world.isSolid(x, y, z) && p.y < y + HEIGHT[world.get(x, y, z)]) return true;
     return false;
+  }
+
+  /** top surface of the solid blocks the feet are sunk into (beds are lower than a full block) */
+  floorTop(world) {
+    const p = this.pos;
+    const y = Math.floor(p.y);
+    let top = y;
+    for (let z = Math.floor(p.z - PW); z <= Math.floor(p.z + PW); z++)
+      for (let x = Math.floor(p.x - PW); x <= Math.floor(p.x + PW); x++)
+        if (world.isSolid(x, y, z)) top = Math.max(top, y + HEIGHT[world.get(x, y, z)]);
+    return top > y ? top : y + 1;
+  }
+
+  /** after a trial step-up: the top of the low block stepped onto, or null if it isn't one */
+  floorTopBelow(world, y0) {
+    const p = this.pos, saved = p.y;
+    p.y = y0;
+    const top = this.floorTop(world);
+    p.y = saved;
+    // only low blocks (beds) can be stepped onto; their tops aren't whole numbers
+    return top <= y0 + 0.6 && top % 1 !== 0 ? top + 0.001 : null;
+  }
+
+  /** standing in a ladder block? */
+  onLadder(world) {
+    const p = this.pos;
+    const x = Math.floor(p.x), z = Math.floor(p.z);
+    return !!(CLIMB[world.get(x, Math.floor(p.y), z)] || CLIMB[world.get(x, Math.floor(p.y + 0.9), z)]);
   }
 
   moveAxis(world, axis, d) {
@@ -35,8 +63,16 @@ export class Player {
     const p = this.pos;
     p[axis] += d;
     if (!this.collides(world)) return;
+    // walk up low blocks (beds) without jumping
+    if (axis !== 'y' && this.canStep) {
+      const y0 = p.y;
+      p.y += 0.6;
+      const top = this.collides(world) ? null : this.floorTopBelow(world, y0);
+      if (top !== null) { p.y = top; return; }
+      p.y = y0;
+    }
     if (axis === 'y') {
-      if (d < 0) { p.y = Math.floor(p.y) + 1; this.onGround = true; }
+      if (d < 0) { p.y = this.floorTop(world); this.onGround = true; }
       else p.y = Math.floor(p.y + PH) - PH - 0.001;
     } else {
       if (d > 0) p[axis] = Math.floor(p[axis] + PW) - PW - 0.001;
@@ -63,7 +99,11 @@ export class Player {
     v.x += (mx * speed - v.x) * k;
     v.z += (mz * speed - v.z) * k;
 
-    if (this.flying) {
+    const ladder = !this.flying && this.onLadder(world);
+    if (ladder) {
+      // climb with W or Space, hold Shift to stay put, otherwise slide down slowly
+      v.y = input.jump || input.forward > 0 ? 3.4 : input.sprint ? 0 : Math.max(v.y - 30 * dt, -2.5);
+    } else if (this.flying) {
       // Space = up, Shift = down
       const vy = ((input.jump ? 1 : 0) - (input.sprint ? 1 : 0)) * 8;
       v.y += (vy - v.y) * k;
@@ -83,6 +123,7 @@ export class Player {
     const steps = Math.max(1, Math.ceil((maxV * dt) / 0.35));
     const sdt = dt / steps;
     const wasOnGround = this.onGround;
+    this.canStep = wasOnGround && !this.flying;
     this.onGround = false;
     this.hitWall = false;
     for (let i = 0; i < steps; i++) {
@@ -93,7 +134,7 @@ export class Player {
 
     // fall tracking: water and flying cancel falls
     this.lastFall = 0;
-    if (inWater || this.flying) this.airMaxY = p.y;
+    if (inWater || this.flying || ladder) this.airMaxY = p.y;
     else if (this.onGround) {
       if (!wasOnGround) this.lastFall = this.airMaxY - p.y;
       this.airMaxY = p.y;
