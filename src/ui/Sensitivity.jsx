@@ -1,4 +1,4 @@
-import { useStore, setSensitivity, setPostfx, setVolume } from '../store.js';
+import { useStore, setSensitivity, setPostfx, setVolume, setMonsters } from '../store.js';
 
 export function Volume() {
   const value = useStore((s) => s.volume);
@@ -24,6 +24,17 @@ export function PostFxToggle() {
     <label className="sens" onClick={(e) => e.stopPropagation()} onMouseDown={(e) => e.stopPropagation()}>
       <span>Bloom &amp; color grading</span>
       <input type="checkbox" checked={on} onChange={(e) => setPostfx(e.target.checked)} />
+      <b>{on ? 'ON' : 'OFF'}</b>
+    </label>
+  );
+}
+
+export function MonstersToggle() {
+  const on = useStore((s) => s.monsters);
+  return (
+    <label className="sens" onClick={(e) => e.stopPropagation()} onMouseDown={(e) => e.stopPropagation()}>
+      <span>Monsters (Glooms)</span>
+      <input type="checkbox" checked={on} onChange={(e) => setMonsters(e.target.checked)} />
       <b>{on ? 'ON' : 'OFF'}</b>
     </label>
   );

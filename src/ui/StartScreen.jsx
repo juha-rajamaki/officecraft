@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Controls } from './Controls.jsx';
-import { Sensitivity } from './Sensitivity.jsx';
+import { Sensitivity, MonstersToggle } from './Sensitivity.jsx';
 import { readSave, writeSave, downloadSave, readSaveFile } from '../game/save.js';
 
 function savedWhen(t) {
@@ -69,6 +69,7 @@ export function StartScreen({ onPlay, onContinue }) {
           <input ref={fileRef} type="file" accept=".json,application/json" hidden onChange={onImport} />
         </div>
         {msg && <p className="continue-seed">{msg}</p>}
+        <MonstersToggle />
         <Sensitivity />
         <Controls />
         <p className="credits">Built by Leevi · improved by borre</p>

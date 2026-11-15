@@ -4,7 +4,7 @@ import { itemName } from '../game/blocks.js';
 import { Slot } from './Slot.jsx';
 import { Inventory } from './Inventory.jsx';
 import { Controls } from './Controls.jsx';
-import { Sensitivity, PostFxToggle, Volume } from './Sensitivity.jsx';
+import { Sensitivity, PostFxToggle, Volume, MonstersToggle } from './Sensitivity.jsx';
 
 function Hotbar() {
   const slots = useStore((s) => s.slots);
@@ -105,6 +105,7 @@ function Pause({ game }) {
         <Sensitivity />
         <Volume />
         <PostFxToggle />
+        <MonstersToggle />
         <div className="save-row" onClick={(e) => e.stopPropagation()} onMouseDown={(e) => e.stopPropagation()}>
           <button className="btn small secondary" onClick={() => { game.current.save(); toast('Game saved'); }}>Save now</button>
           <button className="btn small secondary" onClick={() => game.current.exportSave()}>Export save</button>

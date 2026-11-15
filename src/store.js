@@ -36,6 +36,7 @@ export const store = createStore({
   sensitivity: loadSensitivity(), // 0.2 – 3, multiplier on mouse look
   postfx: loadFlag('officecraft.postfx', true), // bloom + colour grading
   volume: loadVolume(),  // 0 – 1, master sound volume
+  monsters: loadFlag('officecraft.monsters', true), // false = peaceful: no Glooms spawn
 });
 
 function loadVolume() {
@@ -66,6 +67,11 @@ function loadFlag(key, fallback) {
 export function setPostfx(on) {
   store.set({ postfx: on });
   try { localStorage.setItem('officecraft.postfx', on ? '1' : '0'); } catch { /* ignore */ }
+}
+
+export function setMonsters(on) {
+  store.set({ monsters: on });
+  try { localStorage.setItem('officecraft.monsters', on ? '1' : '0'); } catch { /* ignore */ }
 }
 
 function loadSensitivity() {

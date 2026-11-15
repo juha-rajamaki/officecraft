@@ -642,7 +642,8 @@ export class Game {
     }
     this.mouse.leftPressed = false;
     this.mobs.update(dt, this.player, heldId, this.light, 1 - this.dayAmt);
-    this.enemies.update(dt, this.player, this.dayAmt, (dmg, from) => this.hurt(dmg, from));
+    if (store.get().monsters) this.enemies.update(dt, this.player, this.dayAmt, (dmg, from) => this.hurt(dmg, from));
+    else if (this.enemies.list.length) { this.enemies.clear(); this.enemyTarget = null; } // peaceful: no Glooms
 
     // hold T to fast-forward time (handy for reaching the night)
     if (this.keys.has('KeyT')) this.time = (this.time + (dt * 40) / DAY_LEN) % 1;
